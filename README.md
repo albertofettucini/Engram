@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/icon.png" width="120" alt="Engram">
+</p>
+
 <h1 align="center">Engram</h1>
 
 <p align="center">
