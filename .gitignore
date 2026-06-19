@@ -1,0 +1,10 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+.DS_Store
+
+# Never commit a user's actual memory store
+/memories/
+*.memories/
+AUDIT_2026-06-16.md

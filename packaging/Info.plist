@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Engram</string>
+    <key>CFBundleDisplayName</key>
+    <string>Engram</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.engram.Engram</string>
+    <key>CFBundleExecutable</key>
+    <string>Engram</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <!-- Sparkle in-app updates — MANUAL ONLY (no background polling, so the app stays off the network
+         until the user taps "Check for Updates"). SUFeedURL + SUPublicEDKey are set at release time. -->
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
+    <key>SUFeedURL</key>
+    <string>https://example.com/Engram/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>SET_AT_RELEASE_VIA_generate_keys</string>
+</dict>
+</plist>
