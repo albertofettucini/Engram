@@ -18,7 +18,9 @@ env:
 
 jobs:
   release:
-    runs-on: macos-15
+    # macos-26 ships Xcode 26 / the macOS 26 SDK, which the app needs to COMPILE its Liquid Glass
+    # path (`glassEffect`). The app still RUNS on macOS 14+ (the call is guarded by `if #available`).
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,6 +36,7 @@ jobs:
           echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
           echo "Building Engram $VERSION (build $BUILD) from $GITHUB_REF_NAME"
           swift --version
+          xcodebuild -version || true
 
       # ---------- universal CLI binaries (engram-mcp + engram-capture) ----------
       - name: Build CLI (universal arm64 + x86_64)
