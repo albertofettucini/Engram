@@ -39,13 +39,18 @@ jobs:
       - name: Build CLI (universal arm64 + x86_64)
         run: |
           set -euo pipefail
-          swift build -c release --arch arm64 --arch x86_64 \
-            --product engram-mcp --product engram-capture
+          # Build each product in its OWN invocation: a single `swift build` with multiple --product
+          # AND multiple --arch only lipo-merges one product's universal binary (the other is left
+          # absent). Separate builds reliably produce a universal binary for each.
+          swift build -c release --arch arm64 --arch x86_64 --product engram-mcp
+          swift build -c release --arch arm64 --arch x86_64 --product engram-capture
           BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
           mkdir -p dist
-          cp "$BIN/engram-mcp" "$BIN/engram-capture" dist/
-          # sanity: confirm the artifacts are actually universal
-          lipo -info dist/engram-mcp dist/engram-capture
+          for b in engram-mcp engram-capture; do
+            test -f "$BIN/$b" || { echo "::error::$b missing from $BIN after build"; exit 1; }
+            cp "$BIN/$b" dist/
+          done
+          lipo -info dist/engram-mcp dist/engram-capture   # both must be fat (x86_64 + arm64)
 
       - name: Package CLI tarball + checksum
         run: |
