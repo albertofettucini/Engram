@@ -45,21 +45,43 @@ readable, greppable, editable, deletable. **Nothing is ever uploaded.**
 
 ## Install
 
+**Homebrew** — the MCP server + capture CLI, the fastest path:
+
 ```sh
-# 1) the macOS app
-bash packaging/make-app.sh                       # → Engram.app on your Desktop
-
-# 2) connect the memory to Claude (MCP)
-swift build -c release
-.build/release/engram-mcp --connect              # registers Engram with Claude Desktop
-.build/release/engram-mcp --prepare-embeddings   # optional: one-time on-device model for best recall
-
-# 3) (optional) auto-capture durable facts from your Claude Code chats
-.build/release/engram-capture --watch
+brew install albertofettucini/engram/engram
+engram-mcp --connect                 # register Engram with Claude Desktop, then restart it
+engram-mcp --prepare-embeddings      # optional: one-time on-device model for better recall
+engram-capture --watch               # optional: auto-capture durable facts from Claude Code
 ```
 
-Requires **macOS 13+**. No backend, no third-party services — the engine, MCP server, and capture
-tool are pure Swift + Foundation.
+**The desktop app** — to browse, edit, and import your memories: grab `Engram-<version>.zip` from the
+[latest release](https://github.com/albertofettucini/Engram/releases/latest), unzip, drag it to
+Applications, then **right-click → Open** the first time. The app is unsigned (no paid Apple cert), so
+Gatekeeper asks once; after that it opens normally.
+
+**Connect any MCP client.** Anything that speaks MCP reads and writes the same store. `--connect` writes
+the Claude Desktop config for you; to wire another client by hand, point it at the `engram-mcp` binary
+(`which engram-mcp` — usually `/opt/homebrew/bin` on Apple Silicon, `/usr/local/bin` on Intel):
+
+```json
+{
+  "mcpServers": {
+    "engram": { "command": "/opt/homebrew/bin/engram-mcp" }
+  }
+}
+```
+
+**Build from source** — no Homebrew needed:
+
+```sh
+git clone https://github.com/albertofettucini/Engram && cd Engram
+swift build -c release
+.build/release/engram-mcp --connect
+bash packaging/make-app.sh           # → Engram.app on your Desktop
+```
+
+Requirements: the **app needs macOS 14+**; the **CLI tools (MCP server, capture) run on macOS 13+**.
+No backend, no third-party services — the engine, MCP server, and capture tool are pure Swift + Foundation.
 
 ## Engine API
 
