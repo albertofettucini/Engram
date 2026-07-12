@@ -100,6 +100,10 @@ swift build
 swift test
 ```
 
+## More from the same maker
+
+[**Council**](https://github.com/albertofettucini/Council) — ask several LLMs one question; they answer in parallel, peer-review each other blind, and you see exactly where they disagree.
+
 ## License
 
 [MIT](LICENSE) © 2026 Joseph.
