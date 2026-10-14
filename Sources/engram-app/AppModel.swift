@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var storePath: String = ""          // shown in the UI ("your data is right here")
     @Published var combinedFiles: [CombinedFile] = []   // the user's named woven files (zero, one, or many)
     @Published var customSources: [CustomSource] = []   // AIs the user added beyond the built-in six
+    @Published var lastImport: ImportNotice? = nil       // the result line after an import or paste (nil = hidden)
 
     private var engine: MemoryEngine?
 
@@ -281,9 +282,10 @@ final class AppModel: ObservableObject {
         guard let engine else { return 0 }
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let conversation = t.isEmpty ? "Pasted notes" : t
-        let n = (try? MarkdownImporter(engine: engine).importText(text, source: source, conversation: conversation, distill: distill)) ?? 0
+        let summary = (try? MarkdownImporter(engine: engine).importTextSummary(text, source: source, conversation: conversation, distill: distill)) ?? ImportSummary()
         refreshFromStore()   // new memories are already indexed — just refresh the list, no re-embed
-        return n
+        lastImport = ImportNotice(summary: summary, keptKeyFactsOnly: distill)   // after the refresh, once per paste
+        return summary.added
     }
 
     /// "Import" — pick a folder (or file) of .md/.txt notes and pull them into memory.
@@ -319,12 +321,14 @@ final class AppModel: ObservableObject {
         let distill = modePopup.indexOfSelectedItem == 1   // "Key facts only"
 
         let importer = MarkdownImporter(engine: engine)
+        let summary: ImportSummary
         if url.hasDirectoryPath {
-            _ = try? importer.importFolder(at: url, source: source, distill: distill)
+            summary = (try? importer.importFolderSummary(at: url, source: source, distill: distill)) ?? ImportSummary()
         } else {
-            _ = try? importer.importFile(at: url, source: source, distill: distill)
+            summary = (try? importer.importFileSummary(at: url, source: source, distill: distill)) ?? ImportSummary()
         }
         refreshFromStore()   // imported memories are already indexed — refresh the list, no re-embed
+        lastImport = ImportNotice(summary: summary, keptKeyFactsOnly: distill)   // after the refresh; a folder reports once, for all of it
     }
 
     enum ExportFormat { case markdown, json }
@@ -348,6 +352,16 @@ final class AppModel: ObservableObject {
         }
         recallResults = engine.recall(recallQuery, scope: .all, k: 10)
     }
+}
+
+/// One import or paste result, shown once as the toast at the bottom of the list. A fresh `id` per
+/// import, so a new import replaces the old line and restarts its timer even when the numbers match.
+struct ImportNotice: Identifiable, Equatable {
+    let id = UUID()
+    let summary: ImportSummary
+    let keptKeyFactsOnly: Bool   // Keep was "Key facts" — the likely reason nothing came in
+    var importedSomething: Bool { summary.added > 0 }
+    var message: String { summary.message(keptKeyFactsOnly: keptKeyFactsOnly) }
 }
 
 // MARK: - Constellation model

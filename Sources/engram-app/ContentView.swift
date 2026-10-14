@@ -532,6 +532,8 @@ struct ContentView: View {
         .padding(18)
         .frame(maxHeight: .infinity, alignment: .top)
         .liquidPanel(corner: 18, frost: glassFrost, matte: matte)
+        .overlay(alignment: .bottom) { importToast }
+        .animation(.easeInOut(duration: 0.15), value: model.lastImport?.id)   // fades in (and out) over 0.15 s
         .confirmationDialog("Forget this conversation?",
                             isPresented: Binding(get: { pendingDelete != nil },
                                                  set: { if !$0 { pendingDelete = nil } }),
@@ -563,6 +565,35 @@ struct ContentView: View {
         } message: { _ in
             Text("This only deletes the combined file. Your conversations and memories stay untouched.")
         }
+    }
+
+    // MARK: Import result toast
+
+    /// One quiet line after an import or paste: how many came in, and how many were already there. Click
+    /// to dismiss; it hides by itself after 4 s (7 s when nothing came in, so the reason can be read).
+    @ViewBuilder private var importToast: some View {
+        if let notice = model.lastImport {
+            HStack(spacing: 6) {
+                Image(systemName: notice.importedSomething ? "checkmark.circle" : "info.circle")
+                Text(notice.message)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .liquidPanel(corner: 12, frost: glassFrost, matte: matte)
+            .contentShape(Rectangle())
+            .onTapGesture { dismissImportToast(notice.id) }
+            .padding(.bottom, 14)
+            .transition(.opacity)
+            .task(id: notice.id) {
+                try? await Task.sleep(nanoseconds: (notice.importedSomething ? 4 : 7) * 1_000_000_000)
+                dismissImportToast(notice.id)
+            }
+        }
+    }
+
+    /// Hide the toast only if it still shows that import (a newer one replaces it and keeps its own timer).
+    private func dismissImportToast(_ id: UUID) {
+        if model.lastImport?.id == id { model.lastImport = nil }
     }
 
     // MARK: Main panel header + content

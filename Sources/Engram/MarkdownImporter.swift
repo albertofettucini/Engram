@@ -1,5 +1,38 @@
 import Foundation
 
+/// What one import did, for the app's result line ("Imported 12 memories · 3 already in Engram").
+public struct ImportSummary: Equatable, Sendable {
+    /// New memories, including forgotten ones the import brought back.
+    public var added: Int
+    /// Memories that were already in Engram word for word, so they were skipped.
+    public var alreadyPresent: Int
+    /// Files read (0 for a paste).
+    public var files: Int
+
+    public init(added: Int = 0, alreadyPresent: Int = 0, files: Int = 0) {
+        self.added = added
+        self.alreadyPresent = alreadyPresent
+        self.files = files
+    }
+
+    public static func + (a: ImportSummary, b: ImportSummary) -> ImportSummary {
+        ImportSummary(added: a.added + b.added, alreadyPresent: a.alreadyPresent + b.alreadyPresent, files: a.files + b.files)
+    }
+
+    /// The one line the app shows after an import or a paste. `keptKeyFactsOnly` is whether Keep was set
+    /// to Key facts, which is the likely reason nothing came in.
+    public func message(keptKeyFactsOnly: Bool) -> String {
+        if added > 0 {
+            let line = "Imported \(added) \(added == 1 ? "memory" : "memories")"
+            return alreadyPresent > 0 ? line + " · \(alreadyPresent) already in Engram" : line
+        }
+        if alreadyPresent == 1 { return "Nothing new — it was already in Engram" }
+        if alreadyPresent > 1 { return "Nothing new — all \(alreadyPresent) were already in Engram" }
+        return keptKeyFactsOnly ? "Nothing imported — no key facts found. Try Keep: Everything."
+                                : "Nothing imported — no text Engram could use there"
+    }
+}
+
 /// Bring existing notes IN. Point it at a folder (or file) of .md/.txt/.json — an Obsidian vault,
 /// exported notes, your own docs, an Engram export — and each file becomes a conversation whose
 /// paragraphs become memories, so users don't start from zero. The external files are never moved or
@@ -16,19 +49,22 @@ public struct MarkdownImporter {
     /// non-deleted content is skipped; a matching tombstone is REVIVED rather than duplicated.
     @discardableResult
     public func importFile(at url: URL, source: String = "import", distill: Bool = false) throws -> Int {
-        guard let raw = Self.readText(url) else { return 0 }
+        try importFileSummary(at: url, source: source, distill: distill).added
+    }
+
+    /// `importFile`, reporting what was added and what was already there.
+    public func importFileSummary(at url: URL, source: String = "import", distill: Bool = false) throws -> ImportSummary {
+        guard let raw = Self.readText(url) else { return ImportSummary() }
         let isJSON = url.pathExtension.lowercased() == "json"
 
         // Engram's own export (array of full Memory records) → re-insert preserving structure.
         if isJSON, let mems = Self.decodeEngramExport(raw), !mems.isEmpty {
-            var added = 0, revived = false
+            var tally = Tally()
             for m in mems where !m.deleted {
-                let r = importOne(m.content, tags: m.tags, source: m.source, conversation: m.conversationID)
-                if r != .skipped { added += 1 }
-                if r == .revived { revived = true }
+                tally.count(importOne(m.content, tags: m.tags, source: m.source, conversation: m.conversationID))
             }
-            if revived { engine.index.rebuild(from: engine.store.allMemories()) }
-            return added
+            if tally.revived { engine.index.rebuild(from: engine.store.allMemories()) }
+            return tally.summary(files: 1)
         }
 
         let conversation = url.deletingPathExtension().lastPathComponent
@@ -39,29 +75,30 @@ public struct MarkdownImporter {
             chunks = HeuristicDistiller().distill(userMessages: userMsgs.isEmpty ? chunks : userMsgs)
         }
         let tags = distill ? ["import", "distilled"] : ["import"]
-        var added = 0, revived = false
+        var tally = Tally()
         for chunk in chunks {
-            let r = importOne(chunk, tags: tags, source: source, conversation: conversation)
-            if r != .skipped { added += 1 }
-            if r == .revived { revived = true }
+            tally.count(importOne(chunk, tags: tags, source: source, conversation: conversation))
         }
-        if revived { engine.index.rebuild(from: engine.store.allMemories()) }
-        return added
+        if tally.revived { engine.index.rebuild(from: engine.store.allMemories()) }
+        return tally.summary(files: 1)
     }
 
     /// Import raw pasted text (no file). Detects an Engram/AI json export vs plain prose, the same way
     /// importFile does, and pulls memories into one conversation. Returns how many were added.
     @discardableResult
     public func importText(_ raw: String, source: String, conversation: String, distill: Bool = false) throws -> Int {
+        try importTextSummary(raw, source: source, conversation: conversation, distill: distill).added
+    }
+
+    /// `importText`, reporting what was added and what was already there.
+    public func importTextSummary(_ raw: String, source: String, conversation: String, distill: Bool = false) throws -> ImportSummary {
         if let mems = Self.decodeEngramExport(raw), !mems.isEmpty {
-            var added = 0, revived = false
+            var tally = Tally()
             for m in mems where !m.deleted {
-                let r = importOne(m.content, tags: m.tags, source: m.source, conversation: m.conversationID)
-                if r != .skipped { added += 1 }
-                if r == .revived { revived = true }
+                tally.count(importOne(m.content, tags: m.tags, source: m.source, conversation: m.conversationID))
             }
-            if revived { engine.index.rebuild(from: engine.store.allMemories()) }
-            return added
+            if tally.revived { engine.index.rebuild(from: engine.store.allMemories()) }
+            return tally.summary(files: 0)
         }
         // A deliberate paste is not bulk file-import: don't drop short notes (the 20-char floor in `chunk`
         // is for filtering headings/noise out of whole files). Keep every non-empty paragraph, and if even
@@ -81,17 +118,28 @@ public struct MarkdownImporter {
             chunks = HeuristicDistiller().distill(userMessages: userMsgs.isEmpty ? chunks : userMsgs)
         }
         let tags = distill ? ["import", "paste", "distilled"] : ["import", "paste"]
-        var added = 0, revived = false
+        var tally = Tally()
         for chunk in chunks {
-            let r = importOne(chunk, tags: tags, source: source, conversation: conversation)
-            if r != .skipped { added += 1 }
-            if r == .revived { revived = true }
+            tally.count(importOne(chunk, tags: tags, source: source, conversation: conversation))
         }
-        if revived { engine.index.rebuild(from: engine.store.allMemories()) }
-        return added
+        if tally.revived { engine.index.rebuild(from: engine.store.allMemories()) }
+        return tally.summary(files: 0)
     }
 
     private enum ImportResult { case added, revived, skipped }
+
+    /// Counts importOne results: a revived memory counts as added, a skipped one as already present.
+    private struct Tally {
+        var added = 0, alreadyPresent = 0, revived = false
+        mutating func count(_ r: ImportResult) {
+            switch r {
+            case .added: added += 1
+            case .revived: added += 1; revived = true
+            case .skipped: alreadyPresent += 1
+            }
+        }
+        func summary(files: Int) -> ImportSummary { ImportSummary(added: added, alreadyPresent: alreadyPresent, files: files) }
+    }
 
     /// Skip an identical live memory; revive a matching tombstone (re-indexing it) instead of appending
     /// a duplicate; otherwise remember it fresh.
@@ -108,10 +156,15 @@ public struct MarkdownImporter {
     /// Walk a folder and import every supported file inside it.
     @discardableResult
     public func importFolder(at folder: URL, source: String = "import", distill: Bool = false) throws -> Int {
-        guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil) else { return 0 }
-        var total = 0
+        try importFolderSummary(at: folder, source: source, distill: distill).added
+    }
+
+    /// `importFolder`, reporting the totals for the whole folder.
+    public func importFolderSummary(at folder: URL, source: String = "import", distill: Bool = false) throws -> ImportSummary {
+        guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil) else { return ImportSummary() }
+        var total = ImportSummary()
         for case let f as URL in walker where Self.fileExtensions.contains(f.pathExtension.lowercased()) {
-            total += (try? importFile(at: f, source: source, distill: distill)) ?? 0
+            total = total + ((try? importFileSummary(at: f, source: source, distill: distill)) ?? ImportSummary())
         }
         return total
     }

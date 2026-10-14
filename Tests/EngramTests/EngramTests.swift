@@ -248,6 +248,56 @@ final class EngramTests: XCTestCase {
         XCTAssertEqual(engine.store.allMemories().filter { !$0.deleted }.count, 2)
     }
 
+    /// The import summary counts what came in and what was already there: importing the same file twice
+    /// gives added 0, alreadyPresent N. A forgotten memory that comes back counts as added.
+    func testImportSummaryCountsAddedAndAlreadyPresent() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("imp-sum-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("chat.md")
+        try "I love hiking on weekends.\n\nMy car is a blue Honda Civic.\n\nThe launch ships in September."
+            .write(to: file, atomically: true, encoding: .utf8)
+
+        let engine = try MemoryEngine(root: tempRoot())
+        let importer = MarkdownImporter(engine: engine)
+        XCTAssertEqual(try importer.importFileSummary(at: file), ImportSummary(added: 3, alreadyPresent: 0, files: 1))
+        XCTAssertEqual(try importer.importFileSummary(at: file), ImportSummary(added: 0, alreadyPresent: 3, files: 1))
+
+        // Forget one; re-importing brings it back (added) and skips the other two (already present).
+        let honda = try XCTUnwrap(engine.store.allMemories().first { $0.content.contains("Honda") })
+        try engine.forget(honda.id)
+        XCTAssertEqual(try importer.importFileSummary(at: file), ImportSummary(added: 1, alreadyPresent: 2, files: 1))
+
+        // A folder reports one total for every file in it.
+        try "A brand new note about the garden shed.".write(to: dir.appendingPathComponent("garden.txt"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(try importer.importFolderSummary(at: dir), ImportSummary(added: 1, alreadyPresent: 3, files: 2))
+
+        // A paste is the same, with no files.
+        XCTAssertEqual(try importer.importTextSummary("Buy oat milk", source: "chatgpt", conversation: "Quick note"),
+                       ImportSummary(added: 1, alreadyPresent: 0, files: 0))
+        XCTAssertEqual(try importer.importTextSummary("Buy oat milk", source: "chatgpt", conversation: "Quick note"),
+                       ImportSummary(added: 0, alreadyPresent: 1, files: 0))
+
+        // Key facts that find nothing: zero of both.
+        XCTAssertEqual(try importer.importTextSummary("The weather was nice today.", source: "chatgpt", conversation: "Weather", distill: true),
+                       ImportSummary(added: 0, alreadyPresent: 0, files: 0))
+
+        // The Int-returning API is unchanged: it's the added count.
+        XCTAssertEqual(try importer.importFile(at: file), 0)
+    }
+
+    /// The toast line for each outcome, word for word.
+    func testImportSummaryMessages() {
+        XCTAssertEqual(ImportSummary(added: 1).message(keptKeyFactsOnly: false), "Imported 1 memory")
+        XCTAssertEqual(ImportSummary(added: 12).message(keptKeyFactsOnly: false), "Imported 12 memories")
+        XCTAssertEqual(ImportSummary(added: 12, alreadyPresent: 3).message(keptKeyFactsOnly: true), "Imported 12 memories · 3 already in Engram")
+        XCTAssertEqual(ImportSummary(alreadyPresent: 3).message(keptKeyFactsOnly: false), "Nothing new — all 3 were already in Engram")
+        XCTAssertEqual(ImportSummary(alreadyPresent: 3).message(keptKeyFactsOnly: true), "Nothing new — all 3 were already in Engram")
+        XCTAssertEqual(ImportSummary(alreadyPresent: 1).message(keptKeyFactsOnly: false), "Nothing new — it was already in Engram")
+        XCTAssertEqual(ImportSummary().message(keptKeyFactsOnly: false), "Nothing imported — no text Engram could use there")
+        XCTAssertEqual(ImportSummary().message(keptKeyFactsOnly: true), "Nothing imported — no key facts found. Try Keep: Everything.")
+    }
+
     /// Forget conversation moves the file to the Trash: it's gone from the store, intact at the returned
     /// URL, and the same content re-imports. (A scratch "Trash" stands in for the real one.)
     func testForgetConversationMovesFileToTrash() throws {
