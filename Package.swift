@@ -16,7 +16,7 @@ let package = Package(
     ],
     dependencies: [
         // ONLY the GUI app links Sparkle (in-app updates). The library + MCP + capture stay dependency-free.
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0"),
     ],
     targets: [
         .target(name: "Engram"),

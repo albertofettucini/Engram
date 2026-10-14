@@ -15,7 +15,7 @@ permissions:
   contents: write          # create the GitHub Release
 
 env:
-  SPARKLE_TOOLS_VERSION: "2.6.4"   # which Sparkle release to pull `sign_update` from (pin for reproducibility)
+  SPARKLE_TOOLS_VERSION: "2.10.0"  # must equal the Sparkle version Package.resolved pins (bump both together); `sign_update` comes from this tarball
 
 jobs:
   release:

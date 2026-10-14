@@ -32,10 +32,10 @@ in `Info.plist`), the **CLI/library** target **macOS 13+** (`platforms: [.macOS(
 ## One-time setup (manual, gated — do once before the first real release)
 
 1. **Generate the Sparkle EdDSA keypair.** Use the same Sparkle version the workflow pins
-   (`SPARKLE_TOOLS_VERSION`, currently `2.6.4`):
+   (`SPARKLE_TOOLS_VERSION`, currently `2.10.0`):
 
    ```sh
-   curl -fsSL https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz | tar -xJ
+   curl -fsSL https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz | tar -xJ
    ./bin/generate_keys            # creates the private key in your login Keychain, prints the PUBLIC key
    ```
 
