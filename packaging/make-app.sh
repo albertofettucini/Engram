@@ -64,6 +64,32 @@ codesign --force --sign - "$APP/Contents/Frameworks/Sparkle.framework"
 codesign --force --sign - "$APP/Contents/MacOS/Engram"
 codesign --force --sign - "$APP"
 
+# 4b) hard checks on the finished bundle. --deep here only VERIFIES every nested item; the signing
+# above stays inside-out without --deep.
+codesign --verify --deep --strict "$APP"
+# Every --arch passed in SWIFT_BUILD_FLAGS must be in the binaries (a universal build needs both).
+WANT_ARCHS=""; N_ARCHS=0; PREV=""
+for w in $SWIFT_BUILD_FLAGS; do
+  case "$w" in
+    --arch=*) WANT_ARCHS="$WANT_ARCHS ${w#--arch=}"; N_ARCHS=$((N_ARCHS + 1)) ;;
+    *) if [ "$PREV" = "--arch" ]; then WANT_ARCHS="$WANT_ARCHS $w"; N_ARCHS=$((N_ARCHS + 1)); fi ;;
+  esac
+  PREV="$w"
+done
+if [ "$N_ARCHS" -ge 2 ]; then
+  for b in "$APP/Contents/MacOS/Engram" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"; do
+    HAVE=" $(lipo -archs "$b") "
+    for a in $WANT_ARCHS; do
+      case "$HAVE" in *" $a "*) ;; *) echo "❌ $b is missing $a (has:$HAVE)" >&2; exit 1 ;; esac
+    done
+    echo "lipo $(basename "$b"):$HAVE"
+  done
+fi
+MIN_OS="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist")"
+if [ "$MIN_OS" != "14.0" ]; then
+  echo "❌ LSMinimumSystemVersion is '$MIN_OS', expected 14.0" >&2; exit 1
+fi
+
 # 5) place in OUT_DIR (default: the Desktop)
 mkdir -p "$OUT_DIR"
 rm -rf "$OUT_DIR/Engram.app"
