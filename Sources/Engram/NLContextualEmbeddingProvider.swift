@@ -47,6 +47,13 @@ public struct NLContextualEmbeddingProvider: EmbeddingProvider {
         return fallback.embed(text)
     }
 
+    /// True when the transformer model is already on this Mac and loads. Never downloads — safe for
+    /// `engram-mcp --doctor`.
+    public static var contextualAvailable: Bool {
+        guard #available(macOS 14.0, *) else { return false }
+        return ContextualEmbeddingModel.shared(downloadIfNeeded: false) != nil
+    }
+
     /// Deliberate, one-time asset fetch (the only path that may touch the network). Returns a short
     /// human-readable status. Used by `engram-mcp --prepare-embeddings`.
     @discardableResult

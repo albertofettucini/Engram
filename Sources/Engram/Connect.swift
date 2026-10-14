@@ -78,6 +78,13 @@ public struct HostEnvironment {
         return home.appendingPathComponent(".claude.json")
     }
 
+    /// Claude Desktop's log folder (ENGRAM_CLAUDE_LOGS overrides) — mcp-server-engram.log there means
+    /// Claude Desktop has launched Engram before.
+    public var claudeLogsDir: URL {
+        if let p = override("ENGRAM_CLAUDE_LOGS") { return URL(fileURLWithPath: p, isDirectory: true) }
+        return home.appendingPathComponent("Library/Logs/Claude", isDirectory: true)
+    }
+
     /// The first `name` executable on this environment's PATH.
     public func findExecutable(_ name: String, fs: FileSystemProbe = LocalFileSystem()) -> String? {
         StableBinaryPath.findOnPath(name, pathEnv: pathEnv, cwd: cwd, fs: fs)
@@ -369,6 +376,7 @@ public enum EngramCommand: Equatable {
     case serve
     /// nil = every detected client.
     case connect([ConnectClient]?)
+    case doctor
     case prepareEmbeddings
     case usageError(String)
 
@@ -385,6 +393,7 @@ public enum EngramCommand: Equatable {
             }
             return .connect(clients.isEmpty ? nil : clients)
         }
+        if arguments.contains("--doctor") { return .doctor }
         if arguments.contains("--prepare-embeddings") { return .prepareEmbeddings }
         return .serve
     }

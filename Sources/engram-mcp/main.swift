@@ -19,6 +19,7 @@ func log(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 // --connect [claude-desktop | claude-code]: point Claude at this binary so the user NEVER edits JSON by
 // hand (other MCP servers are kept). The decisions (which path, how to merge, did the write land) live
 // in the library's Connector so they're unit-tested; this only prints.
+// --doctor: read-only check of every connection, the store and the embedding model.
 // --prepare-embeddings: one-time, opt-in fetch of Apple's transformer embedding model (the only path
 // that touches the network). After this, recall uses the better model with zero runtime network.
 
@@ -28,6 +29,11 @@ case .connect(let clients):
     for line in report.logs { log(line) }
     for line in report.messages { print(line) }
     exit(report.failed ? 1 : 0)
+case .doctor:
+    // Read-only, and before the engine is built: it never pays for embedding the store.
+    let checks = Doctor.run(env: HostEnvironment.current())
+    print(Doctor.render(checks))
+    exit(Doctor.exitCode(checks))
 case .prepareEmbeddings:
     print(NLContextualEmbeddingProvider.prepare())
     exit(0)
