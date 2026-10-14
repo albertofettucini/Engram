@@ -347,6 +347,23 @@ struct ContentView: View {
                 }
             }
             Divider()
+            // Where the memories live (the ENGRAM_ROOT folder when that's set). MarkdownStore creates it,
+            // so it always exists to reveal.
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Memory files").font(.caption).foregroundStyle(.secondary)
+                Text((model.storePath as NSString).abbreviatingWithTildeInPath)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .lineLimit(2).truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(model.storePath)
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: model.storePath)])
+                } label: {
+                    Label("Reveal in Finder", systemImage: "folder").font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+            }
+            Divider()
             Button { updater.checkForUpdates() } label: {
                 Label("Check for Updates…", systemImage: "arrow.down.circle").font(.system(size: 12))
             }
