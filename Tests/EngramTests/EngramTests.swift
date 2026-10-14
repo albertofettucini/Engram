@@ -248,6 +248,63 @@ final class EngramTests: XCTestCase {
         XCTAssertEqual(engine.store.allMemories().filter { !$0.deleted }.count, 2)
     }
 
+    /// Forget conversation moves the file to the Trash: it's gone from the store, intact at the returned
+    /// URL, and the same content re-imports. (A scratch "Trash" stands in for the real one.)
+    func testForgetConversationMovesFileToTrash() throws {
+        let root = tempRoot()
+        let fakeTrash = root.deletingLastPathComponent().appendingPathComponent("fake-trash-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: fakeTrash, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fakeTrash) }
+
+        let engine = try MemoryEngine(root: root)
+        engine.store.moveToTrash = { url in
+            let dest = fakeTrash.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: dest)
+            return dest
+        }
+        _ = try engine.remember("I love hiking on weekends.", source: "claude", conversation: "chat")
+        let original = root.appendingPathComponent("chat.md")
+        let before = try String(contentsOf: original, encoding: .utf8)
+
+        let landed = try XCTUnwrap(try engine.store.deleteConversationFile("chat"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: original.path), "the file leaves the store")
+        XCTAssertEqual(try String(contentsOf: landed, encoding: .utf8), before, "and is recoverable, unchanged")
+        XCTAssertTrue(engine.store.memories(in: "chat").isEmpty)
+
+        // Nothing left behind blocks a re-import of the same content.
+        XCTAssertEqual(try MarkdownImporter(engine: engine).importText("I love hiking on weekends.", source: "claude", conversation: "chat"), 1)
+
+        // No file → nothing to move.
+        XCTAssertNil(try engine.store.deleteConversationFile("never-existed"))
+    }
+
+    /// When the Trash refuses, the file moves to <Engram>/Trash/<name>-<timestamp>.md (outside the memories
+    /// folder) instead of being deleted.
+    func testForgetConversationFallsBackToEngramTrash() throws {
+        let engramDir = FileManager.default.temporaryDirectory.appendingPathComponent("engram-trash-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: engramDir) }
+        let root = engramDir.appendingPathComponent("memories")
+        let engine = try MemoryEngine(root: root)
+        engine.store.moveToTrash = { _ in throw CocoaError(.featureUnsupported) }
+
+        _ = try engine.remember("My car is a blue Honda Civic.", source: "claude", conversation: "cars")
+        _ = try engine.remember("Second note to keep around.", source: "claude", conversation: "cars")
+        let first = try XCTUnwrap(try engine.store.deleteConversationFile("cars"))
+        XCTAssertEqual(first.deletingLastPathComponent().standardizedFileURL.path,
+                       engramDir.appendingPathComponent("Trash").standardizedFileURL.path)
+        XCTAssertTrue(first.lastPathComponent.hasPrefix("cars-") && first.pathExtension == "md")
+        XCTAssertFalse(first.path.hasPrefix(root.path + "/"), "the fallback is outside the memories folder")
+        XCTAssertTrue(try String(contentsOf: first, encoding: .utf8).contains("Honda Civic"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("cars.md").path))
+
+        // A second forget of the same name in the same second never overwrites the first.
+        _ = try engine.remember("A new note in the same conversation.", source: "claude", conversation: "cars")
+        let second = try XCTUnwrap(try engine.store.deleteConversationFile("cars"))
+        XCTAssertNotEqual(first, second)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
+    }
+
     /// The on-device NaturalLanguage embedder produces a normalized vector and never crashes
     /// (falls back gracefully if the OS word model isn't present in this environment).
     func testNLEmbeddingProvider() {

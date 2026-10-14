@@ -240,11 +240,11 @@ final class AppModel: ObservableObject {
         sources = Array(Set(all.map { $0.source })).sorted()
     }
 
-    /// Forget an ENTIRE conversation — remove its file outright (so the same content can be re-imported
-    /// later instead of being blocked by leftover deleted tombstones).
+    /// Forget an ENTIRE conversation — move its file to the Trash (so the same content can be re-imported
+    /// later instead of being blocked by leftover deleted tombstones, and the file can be put back).
     func deleteConversation(_ conversationID: String) {
         guard let e = engine else { return }
-        try? e.store.deleteConversationFile(conversationID)
+        _ = try? e.store.deleteConversationFile(conversationID)
         e.index.removeConversation(conversationID)
         pruneConversationsFromFiles([conversationID])
         memories.removeAll { $0.conversationID == conversationID }
@@ -256,7 +256,7 @@ final class AppModel: ObservableObject {
         guard let e = engine else { return }
         let set = Set(conversationIDs)
         for c in conversationIDs {
-            try? e.store.deleteConversationFile(c)
+            _ = try? e.store.deleteConversationFile(c)
             e.index.removeConversation(c)
         }
         pruneConversationsFromFiles(conversationIDs)

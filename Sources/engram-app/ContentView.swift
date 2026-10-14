@@ -541,7 +541,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
         } message: { _ in
-            Text("This removes every memory in this conversation. You can re-import it later.")
+            Text("This moves the conversation's file to the Trash. You can put it back from there.")
         }
         .confirmationDialog("Forget \(picked.count) conversations?", isPresented: $pendingBulkDelete) {
             Button("Forget \(picked.count)", role: .destructive) {
@@ -549,7 +549,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This removes every memory in the selected conversations. You can re-import them later.")
+            Text("This moves the selected conversations' files to the Trash. You can put them back from there.")
         }
         .confirmationDialog("Delete this combined file?",
                             isPresented: Binding(get: { pendingFileDelete != nil },

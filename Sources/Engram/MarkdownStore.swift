@@ -18,6 +18,14 @@ import Foundation
 public final class MarkdownStore {
     public let root: URL
 
+    /// Moves a file to the Trash and returns where it landed. The default is the system Trash
+    /// (FileManager.trashItem); tests swap it so they never touch the user's real Trash.
+    public var moveToTrash: (URL) throws -> URL? = { url in
+        var landed: NSURL?
+        try FileManager.default.trashItem(at: url, resultingItemURL: &landed)
+        return landed as URL?
+    }
+
     public init(root: URL) throws {
         self.root = root
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -181,14 +189,32 @@ public final class MarkdownStore {
         return mems[idx]
     }
 
-    /// Hard-delete a whole conversation: remove its .md file entirely (no tombstones left behind). Used
-    /// when the user removes a whole imported file — it's re-importable from the original, and a leftover
-    /// all-deleted file would otherwise block re-importing the same content.
-    public func deleteConversationFile(_ conversationID: String) throws {
+    /// Forget a whole conversation: move its .md file out of the store (no tombstones left behind, so the
+    /// same content can be re-imported later), but never hard-delete it. It goes to the Trash, so the user
+    /// can put it back; if the Trash refuses, it moves to <Engram>/Trash/<name>-<timestamp>.md, which is
+    /// outside the memories folder. Returns where the file went (nil when there was no file).
+    @discardableResult
+    public func deleteConversationFile(_ conversationID: String) throws -> URL? {
         let url = fileURL(conversationID)
-        if FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        if let landed = try? moveToTrash(url) { return landed }
+        if !fm.fileExists(atPath: url.path) { return nil }   // trashed, but the system didn't say where
+
+        let trash = root.deletingLastPathComponent().appendingPathComponent("Trash", isDirectory: true)
+        try fm.createDirectory(at: trash, withIntermediateDirectories: true)
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        let base = url.deletingPathExtension().lastPathComponent + "-" + f.string(from: Date())
+        var dest = trash.appendingPathComponent(base).appendingPathExtension("md")
+        var n = 2
+        while fm.fileExists(atPath: dest.path) {   // two forgets in the same second never overwrite each other
+            dest = trash.appendingPathComponent("\(base)-\(n)").appendingPathExtension("md")
+            n += 1
         }
+        try fm.moveItem(at: url, to: dest)
+        return dest
     }
 
     // MARK: Keyword search
