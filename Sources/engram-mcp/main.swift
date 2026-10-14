@@ -44,7 +44,9 @@ do {
     exit(1)
 }
 
-// MARK: - JSON-RPC plumbing
+// MARK: - JSON-RPC over stdio
+// The protocol itself (methods, tools, version negotiation, client provenance) is MCPServer in the
+// library, where it's unit-tested. This loop only moves lines between stdin/stdout and the handler.
 
 func send(_ message: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: message),
@@ -52,113 +54,7 @@ func send(_ message: [String: Any]) {
     FileHandle.standardOutput.write(Data((line + "\n").utf8))
 }
 
-func reply(id: Any, result: [String: Any]) {
-    send(["jsonrpc": "2.0", "id": id, "result": result])
-}
-func replyError(id: Any, code: Int, _ message: String) {
-    send(["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]])
-}
-func textResult(_ text: String) -> [String: Any] {
-    ["content": [["type": "text", "text": text]]]
-}
-/// A tool result flagged as an error, so MCP clients can distinguish failure from success.
-func errorResult(_ text: String) -> [String: Any] {
-    ["content": [["type": "text", "text": text]], "isError": true]
-}
-
-// MARK: - Tool definitions (advertised via tools/list)
-
-let toolDefs: [[String: Any]] = [
-    [
-        "name": "remember",
-        "description": "Save a durable fact, preference, decision, or piece of context to the user's local memory so it can be recalled in future sessions.",
-        "inputSchema": [
-            "type": "object",
-            "properties": [
-                "text": ["type": "string", "description": "The fact to remember, in a self-contained sentence."],
-                "tags": ["type": "array", "items": ["type": "string"], "description": "Optional tags."],
-                "conversation": ["type": "string", "description": "Optional conversation id; groups memories into one file."],
-            ],
-            "required": ["text"],
-        ],
-    ],
-    [
-        "name": "recall",
-        "description": "Search the user's local memory and return the most relevant remembered facts. Call this before answering when prior context about the user might help. Note: with the default scope 'all' this searches across EVERY conversation, so results may include personal context from other chats.",
-        "inputSchema": [
-            "type": "object",
-            "properties": [
-                "query": ["type": "string", "description": "What to look up."],
-                "scope": ["type": "string", "enum": ["all", "conversation", "file"], "description": "'all' = collective memory across every conversation (default); 'conversation' = only the given conversation; 'file' = only the conversations inside a user-made combined file (pass its name in 'file')."],
-                "conversation": ["type": "string", "description": "Required when scope is 'conversation'."],
-                "file": ["type": "string", "description": "Required when scope is 'file' — the name of a combined file to search within."],
-                "k": ["type": "integer", "description": "How many results (default 5)."],
-            ],
-            "required": ["query"],
-        ],
-    ],
-]
-
-// MARK: - Tool dispatch
-
-func callTool(_ name: String, _ args: [String: Any]) -> [String: Any] {
-    switch name {
-    case "remember":
-        guard let text = (args["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-            return errorResult("Nothing to remember: 'text' was empty.")
-        }
-        let tags = (args["tags"] as? [String]) ?? []
-        let conversation = (args["conversation"] as? String) ?? "claude-desktop"
-        do {
-            let m = try engine.remember(text, tags: tags, source: "claude-desktop", conversation: conversation)
-            return textResult("Remembered (id \(m.id.uuidString.prefix(8)), conversation \"\(conversation)\").")
-        } catch {
-            return errorResult("Could not save memory: \(error.localizedDescription)")
-        }
-
-    case "recall":
-        guard let query = (args["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
-            return errorResult("Nothing to recall: 'query' was empty.")
-        }
-        let k = max(0, min((args["k"] as? Int) ?? 5, 100))   // clamp: a negative k would crash; cap a runaway request
-        let scope: RecallScope
-        switch (args["scope"] as? String) {
-        case "conversation":
-            guard let conv = (args["conversation"] as? String), !conv.trimmingCharacters(in: .whitespaces).isEmpty else {
-                return errorResult("scope 'conversation' requires a non-empty 'conversation' id.")   // don't silently widen to 'all'
-            }
-            scope = .conversation(conv)
-        case "file":
-            guard let fileName = (args["file"] as? String), !fileName.trimmingCharacters(in: .whitespaces).isEmpty else {
-                return errorResult("scope 'file' requires a non-empty 'file' name.")
-            }
-            let root = memoriesRoot()
-            let matches = CombinedFileStore.files(named: fileName, memoriesRoot: root)
-            if matches.isEmpty {
-                let names = CombinedFileStore.load(memoriesRoot: root).map { "\"\($0.name)\"" }
-                let avail = names.isEmpty ? "There are no combined files yet." : "Available files: \(names.joined(separator: ", "))."
-                return errorResult("No combined file named \"\(fileName)\". \(avail)")
-            }
-            if matches.count > 1 {
-                return errorResult("There are \(matches.count) combined files named \"\(fileName)\" — rename one so the scope is unambiguous.")
-            }
-            scope = .conversations(matches[0].conversations)
-        default:
-            scope = .all
-        }
-        let hits = engine.recall(query, scope: scope, k: k)
-        if hits.isEmpty { return textResult("No relevant memories found.") }
-        let body = hits.enumerated().map { i, h in
-            "\(i + 1). \(h.memory.content)  —  [from \"\(h.conversationID)\", source: \(h.memory.source)]"
-        }.joined(separator: "\n")
-        return textResult("Relevant memories:\n\(body)")
-
-    default:
-        return errorResult("Unknown tool: \(name)")
-    }
-}
-
-// MARK: - Main loop
+let server = MCPServer(engine: engine, root: memoriesRoot())
 
 while let line = readLine(strippingNewline: true) {
     if line.isEmpty { continue }
@@ -167,37 +63,5 @@ while let line = readLine(strippingNewline: true) {
         log("engram-mcp: skipped unparseable line")
         continue
     }
-    let method = msg["method"] as? String ?? ""
-    let id = msg["id"]   // absent for notifications
-
-    switch method {
-    case "initialize":
-        let clientVersion = (msg["params"] as? [String: Any])?["protocolVersion"] as? String ?? "2024-11-05"
-        if let id {
-            reply(id: id, result: [
-                "protocolVersion": clientVersion,
-                "capabilities": ["tools": [String: Any]()],
-                "serverInfo": ["name": "engram", "version": "0.1.0"],
-            ])
-        }
-
-    case "tools/list":
-        if let id { reply(id: id, result: ["tools": toolDefs]) }
-
-    case "tools/call":
-        guard let id else { break }
-        let params = msg["params"] as? [String: Any] ?? [:]
-        let name = params["name"] as? String ?? ""
-        let args = params["arguments"] as? [String: Any] ?? [:]
-        reply(id: id, result: callTool(name, args))
-
-    case "ping":
-        if let id { reply(id: id, result: [:]) }
-
-    default:
-        // Notifications (e.g. notifications/initialized) and unknown methods: ignore unless they need a reply.
-        if let id, !method.isEmpty {
-            replyError(id: id, code: -32601, "Method not found: \(method)")
-        }
-    }
+    if let response = server.handle(msg) { send(response) }
 }
