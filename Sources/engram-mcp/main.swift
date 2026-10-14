@@ -17,55 +17,14 @@ func log(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
 // MARK: - One-click connect (engram-mcp --connect)
 // Writes/merges this server into Claude Desktop's config so the user NEVER edits JSON by hand.
-// Preserves any other MCP servers already configured.
-
-func installToClaudeDesktop() {
-    let configPath: String
-    if let env = ProcessInfo.processInfo.environment["ENGRAM_CLAUDE_CONFIG"], !env.isEmpty {
-        configPath = env
-    } else {
-        configPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json").path
-    }
-
-    var p = CommandLine.arguments[0]
-    if !p.hasPrefix("/") { p = FileManager.default.currentDirectoryPath + "/" + p }
-    let binaryPath = URL(fileURLWithPath: p).resolvingSymlinksInPath().path
-
-    var root: [String: Any] = [:]
-    if let data = FileManager.default.contents(atPath: configPath) {
-        // The file EXISTS. If it's present but NOT valid JSON, overwriting it would wipe the user's other
-        // MCP servers — so back it up and bail instead of clobbering.
-        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            let bak = configPath + ".engram-backup"
-            try? data.write(to: URL(fileURLWithPath: bak))
-            log("engram-mcp: existing config is not valid JSON — left untouched (backup at \(bak))")
-            print("Your Claude Desktop config isn't valid JSON, so I didn't touch it (backed it up to \(bak)). Fix it, then re-run --connect.")
-            exit(1)
-        }
-        root = obj   // keep everything the user already has
-    }
-    var servers = root["mcpServers"] as? [String: Any] ?? [:]
-    servers["engram"] = ["command": binaryPath]
-    root["mcpServers"] = servers
-
-    do {
-        try FileManager.default.createDirectory(
-            atPath: (configPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        let out = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-        try out.write(to: URL(fileURLWithPath: configPath), options: .atomic)   // atomic — never leave a truncated config
-        log("engram-mcp: connected → \(configPath) (command = \(binaryPath))")
-        print("Connected to Claude Desktop. Restart Claude Desktop to load Engram.")
-    } catch {
-        log("engram-mcp: connect FAILED: \(error)")
-        print("Connect failed: \(error.localizedDescription)")
-        exit(1)
-    }
-}
+// Preserves any other MCP servers already configured. The decisions (which path, how to merge, did the
+// write land) live in the library's Connector so they're unit-tested; this only prints.
 
 if CommandLine.arguments.contains("--connect") {
-    installToClaudeDesktop()
-    exit(0)
+    let report = Connector(env: HostEnvironment.current()).run(argv0: CommandLine.arguments[0])
+    for line in report.logs { log(line) }
+    for line in report.messages { print(line) }
+    exit(report.failed ? 1 : 0)
 }
 
 // One-time, opt-in fetch of Apple's transformer embedding model (the only path that touches the
