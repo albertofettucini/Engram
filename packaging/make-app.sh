@@ -34,6 +34,9 @@ BIN="$(swift build -c release --product engram-app $SWIFT_BUILD_FLAGS --show-bin
 APP="$WORK/Engram.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN/engram-app" "$APP/Contents/MacOS/Engram"
+# Real SDK in the binary's build-version stamp (Xcode 27's swift build writes the deployment
+# target there) — see stamp-sdk.sh. The app is signed again below.
+bash "$HERE/stamp-sdk.sh" "$APP/Contents/MacOS/Engram"
 cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
 # Stamp version/build (CI passes these; locally they stay at the template values). CFBundleVersion must
 # climb every release or Sparkle won't recognise a newer build.

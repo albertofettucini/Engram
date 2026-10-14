@@ -102,6 +102,8 @@ jobs:
             cp "$BIN/$b" dist/
           done
           lipo -info dist/engram-mcp dist/engram-capture   # both must be fat (x86_64 + arm64)
+          # Xcode 27's swift build stamps the deployment target as the linked SDK; put the real one back.
+          bash packaging/stamp-sdk.sh dist/engram-mcp dist/engram-capture
 
       - name: Package CLI tarball + checksum
         run: |
