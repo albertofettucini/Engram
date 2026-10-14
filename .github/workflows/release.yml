@@ -1,6 +1,8 @@
 name: Release
 
-# Triggered by pushing a SemVer tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
+# Triggered by pushing a SemVer tag, e.g. `git tag v0.1.1 && git push origin v0.1.1`, once CI is green on
+# that commit. If the xcode-27 runner is unavailable: Actions → Release → Run workflow, with
+# runner = macos-26 and the existing tag.
 # Builds the universal CLI binaries + the app, signs the app archive for Sparkle, regenerates the
 # appcast, and publishes a GitHub Release with everything attached. Nothing here needs a paid Apple
 # cert: the app is ad-hoc signed, not notarized (first launch: System Settings → Privacy & Security →
@@ -10,6 +12,17 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner image (macos-26 is the fallback when xcode-27 is unavailable)"
+        default: "xcode-27"
+        type: choice
+        options: ["xcode-27", "macos-26"]
+      tag:
+        description: "Existing vX.Y.Z tag to build"
+        required: true
+        type: string
 
 permissions:
   contents: write          # create the GitHub Release
@@ -19,25 +32,59 @@ env:
 
 jobs:
   release:
-    # macos-26 ships Xcode 26 / the macOS 26 SDK, which the app needs to COMPILE its Liquid Glass
-    # path (`glassEffect`). The app still RUNS on macOS 14+ (the call is guarded by `if #available`).
-    runs-on: macos-26
+    # xcode-27 = macOS 27 + the Xcode 27 SDK (public-preview label), the same runner CI uses. The app
+    # needs the macOS 26 SDK or newer to COMPILE its Liquid Glass path (`glassEffect`); it still RUNS on
+    # macOS 14+ (the call is guarded by `if #available`). macos-26 (Xcode 26) stays selectable as the
+    # workflow_dispatch fallback and builds the same app.
+    runs-on: ${{ inputs.runner || 'xcode-27' }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref }}   # a manual run builds the named tag, not the branch
           fetch-depth: 0           # need full history for a monotonic build number
 
       - name: Resolve version + build number
         id: meta
+        env:
+          # via env, not inline ${{ }}, so a hand-typed dispatch input can't be injected into the script
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"   # a manual run's GITHUB_REF_NAME is the branch, e.g. main
+          if [ -z "$TAG" ] || [ "$TAG" = "main" ]; then
+            echo "::error::No tag to release. Push a vX.Y.Z tag, or run the workflow with the tag input."; exit 1
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a vX.Y.Z tag"; exit 1
+          fi
+          VERSION="${TAG#v}"
+          CONSTANT="$(sed -n 's/.*public static let current = "\(.*\)".*/\1/p' Sources/Engram/Version.swift)"
+          if [ "$VERSION" != "$CONSTANT" ]; then
+            echo "::error::Tag $TAG doesn't match EngramVersion.current ('$CONSTANT') in Sources/Engram/Version.swift"; exit 1
+          fi
+          NOTES_FILE="packaging/release-notes/${VERSION}.html"
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "::error::$NOTES_FILE is missing. Add the update notes before tagging."; exit 1
+          fi
           BUILD="$(git rev-list --count HEAD)"   # monotonic — Sparkle compares CFBundleVersion
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD"     >> "$GITHUB_OUTPUT"
-          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-          echo "Building Engram $VERSION (build $BUILD) from $GITHUB_REF_NAME"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "notes=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+          echo "Building Engram $VERSION (build $BUILD) from $TAG"
           swift --version
           xcodebuild -version || true
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/engram-tests"
+          mkdir -p "$T"
+          ENGRAM_ROOT="$T/memories" \
+          ENGRAM_CLAUDE_CONFIG="$T/claude_desktop_config.json" \
+          ENGRAM_CLAUDE_CODE_CONFIG="$T/claude.json" \
+          ENGRAM_CLAUDE_LOGS="$T/logs" \
+            swift test
 
       # ---------- universal CLI binaries (engram-mcp + engram-capture) ----------
       - name: Build CLI (universal arm64 + x86_64)
@@ -72,6 +119,15 @@ jobs:
           APP_VERSION: ${{ steps.meta.outputs.version }}
           APP_BUILD: ${{ steps.meta.outputs.build }}
         run: bash packaging/make-app.sh
+
+      - name: Check the embedded Sparkle
+        run: |
+          set -euo pipefail
+          EMBEDDED="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/Engram.app/Contents/Frameworks/Sparkle.framework/Resources/Info.plist)"
+          echo "Engram.app embeds Sparkle $EMBEDDED; sign_update comes from $SPARKLE_TOOLS_VERSION"
+          if [ "$EMBEDDED" != "$SPARKLE_TOOLS_VERSION" ]; then
+            echo "::error::Engram.app embeds Sparkle $EMBEDDED, not $SPARKLE_TOOLS_VERSION. Keep Package.resolved and SPARKLE_TOOLS_VERSION in step."; exit 1
+          fi
 
       - name: Zip Engram.app + checksum
         run: |
@@ -129,9 +185,12 @@ jobs:
 
           PREV_ARG=""
           if [ -s prev-appcast.xml ]; then PREV_ARG="--prev prev-appcast.xml"; fi   # -s: exists AND non-empty
+          # The update notes come from a tracked file (no here-doc: the runner's bash 3.2 breaks on an
+          # apostrophe in a here-doc inside $(...)).
           python3 packaging/make-appcast.py \
             --version "$VERSION" --build "$BUILD" --min-os "14.0" \
             --url "$ENCLOSURE_URL" --signature "$SIG" --length "$LEN" \
+            --notes "$(cat "${{ steps.meta.outputs.notes }}")" \
             $PREV_ARG \
             --out dist/appcast.xml
           echo "----- appcast.xml -----"; cat dist/appcast.xml
@@ -152,20 +211,14 @@ jobs:
           )
           [ -f dist/appcast.xml ] && ASSETS+=("dist/appcast.xml")
 
-          NOTES="$(cat <<EOF
-          Engram ${VERSION} — one shared, local memory for your AIs.
-
-          **Install**
-          - Homebrew (CLI + MCP server): \`brew install albertofettucini/engram/engram\`
-          - Or download \`Engram-${VERSION}.zip\` below, unzip, drag to Applications, then right-click → Open (unsigned app).
-
-          The \`.app\` is unsigned (no paid Apple cert); the CLI binaries are universal (Apple Silicon + Intel).
-          See the README for connecting the memory to Claude via \`engram-mcp --connect\`.
-          EOF
-          )"
+          # The body is a tracked template rendered to a file and passed with --notes-file. No here-doc:
+          # the runner's /bin/bash is 3.2, which breaks on an apostrophe in a here-doc inside $(...).
+          BODY="$RUNNER_TEMP/body.md"
+          sed "s/VERSION/${VERSION}/g" packaging/release-body.md > "$BODY"
+          echo "----- release body -----"; cat "$BODY"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
-            gh release create "$TAG" "${ASSETS[@]}" --title "Engram ${VERSION}" --notes "$NOTES"
+            gh release create "$TAG" "${ASSETS[@]}" --title "Engram ${VERSION}" --notes-file "$BODY"
           fi
