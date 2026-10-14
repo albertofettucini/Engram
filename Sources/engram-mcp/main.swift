@@ -15,23 +15,27 @@ func memoriesRoot() -> URL { CombinedFileStore.defaultMemoriesRoot() }   // one 
 
 func log(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
-// MARK: - One-click connect (engram-mcp --connect)
-// Writes/merges this server into Claude Desktop's config so the user NEVER edits JSON by hand.
-// Preserves any other MCP servers already configured. The decisions (which path, how to merge, did the
-// write land) live in the library's Connector so they're unit-tested; this only prints.
+// MARK: - Command-line flags
+// --connect [claude-desktop | claude-code]: point Claude at this binary so the user NEVER edits JSON by
+// hand (other MCP servers are kept). The decisions (which path, how to merge, did the write land) live
+// in the library's Connector so they're unit-tested; this only prints.
+// --prepare-embeddings: one-time, opt-in fetch of Apple's transformer embedding model (the only path
+// that touches the network). After this, recall uses the better model with zero runtime network.
 
-if CommandLine.arguments.contains("--connect") {
-    let report = Connector(env: HostEnvironment.current()).run(argv0: CommandLine.arguments[0])
+switch EngramCommand.parse(Array(CommandLine.arguments.dropFirst())) {
+case .connect(let clients):
+    let report = Connector(env: HostEnvironment.current()).run(argv0: CommandLine.arguments[0], clients: clients)
     for line in report.logs { log(line) }
     for line in report.messages { print(line) }
     exit(report.failed ? 1 : 0)
-}
-
-// One-time, opt-in fetch of Apple's transformer embedding model (the only path that touches the
-// network). After this, recall uses the better model with zero runtime network.
-if CommandLine.arguments.contains("--prepare-embeddings") {
+case .prepareEmbeddings:
     print(NLContextualEmbeddingProvider.prepare())
     exit(0)
+case .usageError(let message):
+    print(message)
+    exit(2)
+case .serve:
+    break
 }
 
 let engine: MemoryEngine

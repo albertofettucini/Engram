@@ -42,11 +42,55 @@ final class ConnectTests: XCTestCase {
         return (prefix, cellar)
     }
 
-    private func env(config: String? = nil, path: String = "/nonexistent") -> HostEnvironment {
+    /// A hermetic environment: scratch HOME, scratch configs, a PATH of temp folders only, and an empty
+    /// Applications folder (so the real /Applications/Claude.app never counts as "installed").
+    private func env(config: String? = nil, path: String = "/nonexistent", desktopOverride: Bool = true) -> HostEnvironment {
         var vars: [String: String] = [:]
-        vars["ENGRAM_CLAUDE_CONFIG"] = config ?? tmp.appendingPathComponent("claude_desktop_config.json").path
+        if desktopOverride {
+            vars["ENGRAM_CLAUDE_CONFIG"] = config ?? tmp.appendingPathComponent("claude_desktop_config.json").path
+        }
+        vars["ENGRAM_CLAUDE_CODE_CONFIG"] = claudeJSON.path
         return HostEnvironment(home: URL(fileURLWithPath: home), cwd: tmp.path, pathEnv: path,
-                               variables: vars, memoriesRoot: tmp.appendingPathComponent("engram/memories"))
+                               variables: vars, memoriesRoot: tmp.appendingPathComponent("engram/memories"),
+                               applicationsDirs: [tmp.appendingPathComponent("Applications").path])
+    }
+
+    private var claudeJSON: URL { tmp.appendingPathComponent("fake-claude.json") }
+    private var claudeLog: URL { tmp.appendingPathComponent("fake-claude-argv.log") }
+    private var fakeBin: String { tmp.appendingPathComponent("fakebin").path }
+
+    /// A fake `claude` on a temp PATH: logs "<cwd>|<argv>" and edits a fake config the way the real CLI
+    /// would. `behavior` swaps in a failing, lying or hanging CLI. CI never calls a real `claude`.
+    private func installFakeClaude(_ behavior: String = "ok") throws {
+        let config = claudeJSON.path, log = claudeLog.path
+        let body: String
+        switch behavior {
+        case "fail":  body = "echo 'MCP server engram already exists in user config.' >&2; exit 1"
+        case "lie":   body = "exit 0"
+        case "hang":  body = "exec /bin/sleep 30"
+        default:
+            body = """
+            case "$1 $2" in
+              "mcp add") printf '{"mcpServers":{"engram":{"type":"stdio","command":"%s","args":[],"env":{}}},"numStartups":3}' "$7" > '\(config)' ;;
+              "mcp remove") printf '{"mcpServers":{},"numStartups":3}' > '\(config)' ;;
+              *) echo "unexpected: $*" >&2; exit 3 ;;
+            esac
+            """
+        }
+        let script = "#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> '\(log)'\n\(body)\n"
+        try FileManager.default.createDirectory(atPath: fakeBin, withIntermediateDirectories: true)
+        let url = URL(fileURLWithPath: fakeBin + "/claude")
+        try script.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    /// Each fake-claude call as (cwd, argv).
+    private func claudeCalls() -> [(cwd: String, argv: String)] {
+        guard let text = try? String(contentsOf: claudeLog, encoding: .utf8) else { return [] }
+        return text.split(separator: "\n").map { line in
+            let parts = line.split(separator: "|", maxSplits: 1).map(String.init)
+            return (parts[0], parts.count > 1 ? parts[1] : "")
+        }
     }
 
     private func resolve(_ argv0: String, cwd: String? = nil, path: String = "") -> StableBinaryPath.Resolution {
@@ -106,7 +150,7 @@ final class ConnectTests: XCTestCase {
     /// A non-runnable argv0 exits 1 and never creates the config.
     func testConnectWithNoRunnableBinaryWritesNothing() throws {
         let config = tmp.appendingPathComponent("c.json").path
-        let report = Connector(env: env(config: config)).run(argv0: "./not-there/engram-mcp")
+        let report = Connector(env: env(config: config)).run(argv0: "./not-there/engram-mcp", clients: nil)
         XCTAssertTrue(report.failed)
         XCTAssertEqual(report.messages, [
             "Couldn't find a runnable engram-mcp to point Claude at (looked at \(tmp.path)/not-there/engram-mcp). Nothing was changed.",
@@ -155,7 +199,7 @@ final class ConnectTests: XCTestCase {
         let broken = "{\"mcpServers\": {\"other\": {\"command\": \"/x\"}},, }"
         try broken.write(to: config, atomically: true, encoding: .utf8)
 
-        let report = Connector(env: env(config: config.path)).run(argv0: binary)
+        let report = Connector(env: env(config: config.path)).run(argv0: binary, clients: [.claudeDesktop])
         XCTAssertTrue(report.failed)
         XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), broken)   // untouched
         let backup = config.path + ".engram-backup"
@@ -173,7 +217,7 @@ final class ConnectTests: XCTestCase {
         let e = env(config: config.path)
         let at = Date(timeIntervalSince1970: 1_800_000_000)
 
-        let report = Connector(env: e, now: { at }).run(argv0: binary)
+        let report = Connector(env: e, now: { at }).run(argv0: binary, clients: [.claudeDesktop])
         XCTAssertFalse(report.failed)
         XCTAssertEqual(report.messages, [
             "Engram is connected to Claude Desktop (\(binary)). Quit and reopen Claude Desktop to load it.",
@@ -188,7 +232,7 @@ final class ConnectTests: XCTestCase {
     func testBuildFolderBinaryPrintsHeadsUpButStillConnects() throws {
         let binary = try makeFile("repo/.build/debug/engram-mcp")
         let config = tmp.appendingPathComponent("c.json")
-        let report = Connector(env: env(config: config.path)).run(argv0: binary)
+        let report = Connector(env: env(config: config.path)).run(argv0: binary, clients: [.claudeDesktop])
         XCTAssertFalse(report.failed)
         XCTAssertEqual(report.messages.first,
                        "Heads-up: \(binary) is inside a build folder or your Desktop, so it can move. The Homebrew install is the stable choice.")
@@ -201,7 +245,7 @@ final class ConnectTests: XCTestCase {
         try "not a folder".write(to: tmp.appendingPathComponent("blocker"), atomically: true, encoding: .utf8)
         let config = tmp.appendingPathComponent("blocker/claude_desktop_config.json").path   // parent is a file
 
-        let report = Connector(env: env(config: config)).run(argv0: binary)
+        let report = Connector(env: env(config: config)).run(argv0: binary, clients: [.claudeDesktop])
         XCTAssertTrue(report.failed)
         XCTAssertFalse(report.messages.contains { $0.hasPrefix("Engram is connected") })
         XCTAssertTrue(report.messages.last?.hasPrefix("Couldn't connect Claude Desktop:") ?? false)
@@ -221,5 +265,155 @@ final class ConnectTests: XCTestCase {
         XCTAssertTrue(ConnectionStore.save(ConnectionRecord(client: "claude-desktop", command: "/a", connectedAt: Date(timeIntervalSince1970: 1)), memoriesRoot: root))
         XCTAssertTrue(ConnectionStore.save(ConnectionRecord(client: "claude-desktop", command: "/b", connectedAt: Date(timeIntervalSince1970: 2)), memoriesRoot: root))
         XCTAssertEqual(ConnectionStore.load(memoriesRoot: root).map(\.command), ["/b"])
+    }
+
+    // MARK: Claude Code (011-2)
+
+    private let codeSuccess = "Engram is connected to Claude Code (user scope). New Claude Code sessions will see it."
+
+    func testClaudeCodeIsAddedAtUserScopeFromATempFolder() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude()
+        // A project .mcp.json in the user's current folder must never be seen by the CLI run.
+        try "{}".write(to: tmp.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        let e = env(path: fakeBin)
+
+        let report = Connector(env: e).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertFalse(report.failed, report.messages.joined(separator: "\n"))
+        XCTAssertEqual(report.messages, [codeSuccess])
+        let calls = claudeCalls()
+        XCTAssertEqual(calls.map { $0.argv }, ["mcp add -s user engram -- \(binary)"])
+        XCTAssertNotEqual(calls.first?.cwd, tmp.path)
+        XCTAssertTrue(calls.first?.cwd.contains("engram-connect-") ?? false)
+        XCTAssertFalse(calls.contains { $0.argv.contains("get") })   // never `claude mcp get`
+        XCTAssertEqual(ConnectionStore.load(memoriesRoot: e.memoriesRoot).map(\.client), ["claude-code"])
+    }
+
+    func testDifferentExistingEntryIsRemovedThenAdded() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude()
+        try #"{"mcpServers":{"engram":{"type":"stdio","command":"/old/Cellar/engram/0.1.0/bin/engram-mcp","args":[]}}}"#
+            .write(to: claudeJSON, atomically: true, encoding: .utf8)
+
+        let report = Connector(env: env(path: fakeBin)).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertFalse(report.failed)
+        XCTAssertEqual(claudeCalls().map { $0.argv }, ["mcp remove engram -s user", "mcp add -s user engram -- \(binary)"])
+        XCTAssertEqual(report.messages, [codeSuccess])
+    }
+
+    func testMatchingEntryNeedsNoCLICall() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude()
+        try #"{"mcpServers":{"engram":{"type":"stdio","command":"\#(binary)","args":[],"env":{}}}}"#
+            .write(to: claudeJSON, atomically: true, encoding: .utf8)
+
+        let report = Connector(env: env(path: fakeBin)).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertFalse(report.failed)
+        XCTAssertEqual(report.messages, [codeSuccess])
+        XCTAssertTrue(claudeCalls().isEmpty)
+    }
+
+    func testMissingClaudePrintsTheCommandInstead() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        let skipped = "Claude Code isn't installed here (no `claude` on PATH) — skipped. To add it later: claude mcp add -s user engram -- \(binary)"
+
+        // Plain --connect: Claude Code wasn't detected, so it's skipped without failing the run.
+        let all = Connector(env: env(path: fakeBin)).run(argv0: binary, clients: nil)
+        XCTAssertFalse(all.failed)
+        XCTAssertEqual(all.messages.last, skipped)
+
+        // --connect claude-code: asked for by name and not done → exit 1.
+        let named = Connector(env: env(path: fakeBin)).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertTrue(named.failed)
+        XCTAssertEqual(named.messages, [skipped])
+    }
+
+    func testCLIErrorIsReportedWithTheCommandToRun() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude("fail")
+        let report = Connector(env: env(path: fakeBin)).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertTrue(report.failed)
+        XCTAssertEqual(report.messages, [
+            "Couldn't connect Claude Code: `claude mcp add` said \"MCP server engram already exists in user config.\". Run this yourself: claude mcp add -s user engram -- \(binary)",
+        ])
+    }
+
+    /// The CLI says it worked but the config doesn't show it: never print success.
+    func testCLISuccessWithoutTheEntryIsAFailure() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude("lie")
+        let report = Connector(env: env(path: fakeBin)).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertTrue(report.failed)
+        XCTAssertFalse(report.messages.contains(codeSuccess))
+        XCTAssertTrue(report.messages.first?.hasPrefix("Couldn't connect Claude Code: `claude mcp add` finished, but ") ?? false)
+        XCTAssertTrue(ConnectionStore.load(memoriesRoot: env().memoriesRoot).isEmpty)
+    }
+
+    func testHangingCLITimesOut() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude("hang")
+        let start = Date()
+        let report = Connector(env: env(path: fakeBin), processTimeout: 1).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertLessThan(Date().timeIntervalSince(start), 10)
+        XCTAssertTrue(report.failed)
+        XCTAssertEqual(report.messages, [
+            "Couldn't connect Claude Code: `claude mcp add` didn't finish within 1 seconds. Run this yourself: claude mcp add -s user engram -- \(binary)",
+        ])
+    }
+
+    /// Plain --connect connects every detected client: Desktop (its support folder exists) and Code.
+    func testPlainConnectConnectsEveryDetectedClient() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude()
+        let e = env(path: fakeBin, desktopOverride: false)
+        try FileManager.default.createDirectory(at: e.desktopSupportDir, withIntermediateDirectories: true)
+
+        let report = Connector(env: e).run(argv0: binary, clients: nil)
+        XCTAssertFalse(report.failed)
+        XCTAssertEqual(report.messages, [
+            "Engram is connected to Claude Desktop (\(binary)). Quit and reopen Claude Desktop to load it.",
+            codeSuccess,
+        ])
+        XCTAssertEqual(DesktopConfig.engramCommand(in: try Data(contentsOf: e.desktopConfigURL)), binary)
+        XCTAssertEqual(ConnectionStore.load(memoriesRoot: e.memoriesRoot).map(\.client), ["claude-code", "claude-desktop"])
+    }
+
+    func testUndetectedDesktopIsSkippedAndNotWritten() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude()
+        let e = env(path: fakeBin, desktopOverride: false)
+
+        let report = Connector(env: e).run(argv0: binary, clients: nil)
+        XCTAssertFalse(report.failed)
+        XCTAssertEqual(report.messages, ["Claude Desktop isn't installed here — skipped.", codeSuccess])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: e.desktopConfigURL.path))
+    }
+
+    func testClaudeCodeConfigLocation() {
+        let h = URL(fileURLWithPath: "/h")
+        func url(_ vars: [String: String]) -> String {
+            HostEnvironment(home: h, cwd: "/", pathEnv: "", variables: vars, memoriesRoot: h).claudeCodeConfigURL.path
+        }
+        XCTAssertEqual(url([:]), "/h/.claude.json")
+        XCTAssertEqual(url(["CLAUDE_CONFIG_DIR": "/cfg"]), "/cfg/.claude.json")
+        XCTAssertEqual(url(["CLAUDE_CONFIG_DIR": "/cfg", "ENGRAM_CLAUDE_CODE_CONFIG": "/x/c.json"]), "/x/c.json")
+    }
+
+    func testShellQuotingOfThePrintedCommand() {
+        XCTAssertEqual(Connector.shellQuoted("/opt/homebrew/bin/engram-mcp"), "/opt/homebrew/bin/engram-mcp")
+        XCTAssertEqual(Connector.shellQuoted("/Users/a b/engram-mcp"), "'/Users/a b/engram-mcp'")
+        XCTAssertEqual(Connector.shellQuoted("/it's/engram-mcp"), #"'/it'\''s/engram-mcp'"#)
+    }
+
+    // MARK: argument parsing
+
+    func testArgumentParsing() {
+        XCTAssertEqual(EngramCommand.parse([]), .serve)
+        XCTAssertEqual(EngramCommand.parse(["--connect"]), .connect(nil))
+        XCTAssertEqual(EngramCommand.parse(["--connect", "claude-code"]), .connect([.claudeCode]))
+        XCTAssertEqual(EngramCommand.parse(["--connect", "claude-desktop", "claude-code"]), .connect([.claudeDesktop, .claudeCode]))
+        XCTAssertEqual(EngramCommand.parse(["--connect", "--verbose"]), .connect(nil))
+        XCTAssertEqual(EngramCommand.parse(["--prepare-embeddings"]), .prepareEmbeddings)
+        if case .usageError = EngramCommand.parse(["--connect", "cursor"]) {} else { XCTFail("unknown client must be a usage error") }
     }
 }

@@ -16,13 +16,17 @@ public struct HostEnvironment {
     /// Environment variables: overrides (ENGRAM_CLAUDE_CONFIG, …) are read from here.
     public var variables: [String: String]
     public var memoriesRoot: URL
+    /// Where apps are installed (Claude.app is looked for here).
+    public var applicationsDirs: [String]
 
-    public init(home: URL, cwd: String, pathEnv: String, variables: [String: String], memoriesRoot: URL) {
+    public init(home: URL, cwd: String, pathEnv: String, variables: [String: String], memoriesRoot: URL,
+                applicationsDirs: [String] = ["/Applications"]) {
         self.home = home
         self.cwd = cwd
         self.pathEnv = pathEnv
         self.variables = variables
         self.memoriesRoot = memoriesRoot
+        self.applicationsDirs = applicationsDirs
     }
 
     /// The real environment of this process. HOME is honored when set (so a scratch HOME keeps a test run
@@ -50,7 +54,33 @@ public struct HostEnvironment {
     /// Claude Desktop's config file (ENGRAM_CLAUDE_CONFIG overrides the location).
     public var desktopConfigURL: URL {
         if let p = override("ENGRAM_CLAUDE_CONFIG") { return URL(fileURLWithPath: p) }
-        return home.appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json")
+        return desktopSupportDir.appendingPathComponent("claude_desktop_config.json")
+    }
+
+    /// ~/Library/Application Support/Claude — exists once Claude Desktop has run.
+    public var desktopSupportDir: URL {
+        home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+    }
+
+    /// Claude Desktop counts as installed when its support folder or Claude.app exists (or a config
+    /// location was given explicitly with ENGRAM_CLAUDE_CONFIG).
+    public var desktopDetected: Bool {
+        if override("ENGRAM_CLAUDE_CONFIG") != nil { return true }
+        if FileManager.default.fileExists(atPath: desktopSupportDir.path) { return true }
+        return applicationsDirs.contains { FileManager.default.fileExists(atPath: $0 + "/Claude.app") }
+    }
+
+    /// Claude Code's user-scope config, read-only for Engram (only the `claude` CLI writes it).
+    /// ENGRAM_CLAUDE_CODE_CONFIG overrides; CLAUDE_CONFIG_DIR moves it the same way it moves it for Claude Code.
+    public var claudeCodeConfigURL: URL {
+        if let p = override("ENGRAM_CLAUDE_CODE_CONFIG") { return URL(fileURLWithPath: p) }
+        if let dir = override("CLAUDE_CONFIG_DIR") { return URL(fileURLWithPath: dir).appendingPathComponent(".claude.json") }
+        return home.appendingPathComponent(".claude.json")
+    }
+
+    /// The first `name` executable on this environment's PATH.
+    public func findExecutable(_ name: String, fs: FileSystemProbe = LocalFileSystem()) -> String? {
+        StableBinaryPath.findOnPath(name, pathEnv: pathEnv, cwd: cwd, fs: fs)
     }
 }
 
@@ -109,13 +139,9 @@ public enum StableBinaryPath {
         if argv0.contains("/") {
             found = absolute(argv0, cwd: cwd)
         } else {
-            var hit: String?
-            for dir in pathEnv.split(separator: ":", omittingEmptySubsequences: false).map(String.init) {
-                let base = dir.isEmpty ? cwd : absolute(dir, cwd: cwd)   // an empty PATH entry means "."
-                let candidate = normalize(base + "/" + argv0)
-                if fs.isExecutableFile(candidate) { hit = candidate; break }
+            guard let hit = findOnPath(argv0, pathEnv: pathEnv, cwd: cwd, fs: fs) else {
+                return .notRunnable(lookedAt: "\(argv0) on your PATH")
             }
-            guard let hit else { return .notRunnable(lookedAt: "\(argv0) on your PATH") }
             found = hit
         }
 
@@ -138,6 +164,17 @@ public enum StableBinaryPath {
         let homes = [home] + [fs.realPath(home)].compactMap { $0 }
         let canMove = isMovable(final, homes: homes) || (!mappedToBrewBin && isMovable(real, homes: homes))
         return .runnable(path: final, canMove: canMove)
+    }
+
+    /// The first executable called `name` on `pathEnv`, as the shell would find it.
+    public static func findOnPath(_ name: String, pathEnv: String, cwd: String,
+                                  fs: FileSystemProbe = LocalFileSystem()) -> String? {
+        for dir in pathEnv.split(separator: ":", omittingEmptySubsequences: false).map(String.init) {
+            let base = dir.isEmpty ? cwd : absolute(dir, cwd: cwd)   // an empty PATH entry means "."
+            let candidate = normalize(base + "/" + name)
+            if fs.isExecutableFile(candidate) { return candidate }
+        }
+        return nil
     }
 
     /// <prefix> when `path` is <prefix>/Cellar/engram/<version>/bin/<name>, else nil.
@@ -225,6 +262,41 @@ public enum DesktopConfig {
     }
 }
 
+// MARK: - Claude Code config (read-only)
+
+/// Engram never edits ~/.claude.json itself — the `claude` CLI does. This only reads the user-scope entry,
+/// so --connect can tell whether a change is needed (and verify it landed) WITHOUT `claude mcp get`, which
+/// launches stdio servers (including the current folder's .mcp.json) to health-check them.
+public enum ClaudeCodeConfig {
+    public struct Entry: Equatable {
+        public var command: String?
+        public var args: [String]
+        public var type: String?
+    }
+
+    public enum Read: Equatable {
+        case noFile
+        case unreadable
+        case noEntry
+        case entry(Entry)
+    }
+
+    /// Top-level mcpServers.engram (= user scope).
+    public static func userEngramEntry(in data: Data) -> Read {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return .unreadable }
+        guard let servers = obj["mcpServers"] as? [String: Any],
+              let engram = servers["engram"] as? [String: Any] else { return .noEntry }
+        return .entry(Entry(command: engram["command"] as? String,
+                            args: engram["args"] as? [String] ?? [],
+                            type: engram["type"] as? String))
+    }
+
+    public static func userEngramEntry(at url: URL) -> Read {
+        guard let data = FileManager.default.contents(atPath: url.path) else { return .noFile }
+        return userEngramEntry(in: data)
+    }
+}
+
 // MARK: - Connection records
 
 /// "Engram connected <client> to <command> at <time>" — kept next to combined-files.json so a later
@@ -284,6 +356,107 @@ public enum ConnectionStore {
     }
 }
 
+// MARK: - Command line
+
+/// The MCP clients --connect knows how to connect.
+public enum ConnectClient: String, CaseIterable, Sendable {
+    case claudeDesktop = "claude-desktop"
+    case claudeCode = "claude-code"
+}
+
+/// What `engram-mcp <args>` should do. Anything it doesn't recognize starts the server, as before.
+public enum EngramCommand: Equatable {
+    case serve
+    /// nil = every detected client.
+    case connect([ConnectClient]?)
+    case prepareEmbeddings
+    case usageError(String)
+
+    /// `arguments` excludes the program name.
+    public static func parse(_ arguments: [String]) -> EngramCommand {
+        if let i = arguments.firstIndex(of: "--connect") {
+            var clients: [ConnectClient] = []
+            for token in arguments[(i + 1)...] {
+                if token.hasPrefix("-") { break }
+                guard let client = ConnectClient(rawValue: token) else {
+                    return .usageError("Unknown client \"\(token)\". Use: engram-mcp --connect [claude-desktop | claude-code]")
+                }
+                if !clients.contains(client) { clients.append(client) }
+            }
+            return .connect(clients.isEmpty ? nil : clients)
+        }
+        if arguments.contains("--prepare-embeddings") { return .prepareEmbeddings }
+        return .serve
+    }
+}
+
+// MARK: - Running the claude CLI
+
+public struct ProcessOutcome: Equatable {
+    public var status: Int32
+    public var stdout: String
+    public var stderr: String
+    public var timedOut: Bool
+    /// Set when the process couldn't be started at all.
+    public var launchError: String?
+}
+
+enum ProcessRunner {
+    /// Run `executable` with `arguments` in a FRESH, empty temp folder (so nothing the user's current folder
+    /// contains — a .mcp.json, say — is ever picked up), stdin closed, output captured, killed after `timeout`.
+    static func run(_ executable: String, _ arguments: [String], environment: [String: String],
+                    timeout: TimeInterval) -> ProcessOutcome {
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory.appendingPathComponent("engram-connect-" + UUID().uuidString, isDirectory: true)
+        let outURL = work.appendingPathComponent("stdout.txt")
+        let errURL = work.appendingPathComponent("stderr.txt")
+        defer { try? fm.removeItem(at: work) }
+        do {
+            try fm.createDirectory(at: work, withIntermediateDirectories: true)
+            fm.createFile(atPath: outURL.path, contents: nil)
+            fm.createFile(atPath: errURL.path, contents: nil)
+        } catch {
+            return ProcessOutcome(status: -1, stdout: "", stderr: "", timedOut: false, launchError: error.localizedDescription)
+        }
+        // Files, not pipes: a chatty process can't deadlock on a full pipe buffer.
+        guard let outHandle = try? FileHandle(forWritingTo: outURL),
+              let errHandle = try? FileHandle(forWritingTo: errURL) else {
+            return ProcessOutcome(status: -1, stdout: "", stderr: "", timedOut: false, launchError: "couldn't create output files")
+        }
+        defer { try? outHandle.close(); try? errHandle.close() }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.currentDirectoryURL = work
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = outHandle
+        process.standardError = errHandle
+
+        let done = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in done.signal() }
+        do {
+            try process.run()
+        } catch {
+            return ProcessOutcome(status: -1, stdout: "", stderr: "", timedOut: false, launchError: error.localizedDescription)
+        }
+        var timedOut = false
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            timedOut = true
+            process.terminate()
+            if done.wait(timeout: .now() + 2) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                _ = done.wait(timeout: .now() + 2)
+            }
+        }
+        let out = (try? String(contentsOf: outURL, encoding: .utf8)) ?? ""
+        let err = (try? String(contentsOf: errURL, encoding: .utf8)) ?? ""
+        return ProcessOutcome(status: timedOut ? -1 : process.terminationStatus, stdout: out, stderr: err,
+                              timedOut: timedOut, launchError: nil)
+    }
+}
+
 // MARK: - Connect
 
 /// What a --connect run said and whether it failed. `messages` go to stdout (for people), `logs` to stderr.
@@ -295,20 +468,23 @@ public struct ConnectReport: Equatable {
 }
 
 public struct Connector {
-    public static let desktopClient = "claude-desktop"
-
     public let env: HostEnvironment
     public let fs: FileSystemProbe
     public let now: () -> Date
+    /// How long one `claude mcp …` call may take.
+    public let processTimeout: TimeInterval
 
-    public init(env: HostEnvironment, fs: FileSystemProbe = LocalFileSystem(), now: @escaping () -> Date = Date.init) {
+    public init(env: HostEnvironment, fs: FileSystemProbe = LocalFileSystem(),
+                now: @escaping () -> Date = Date.init, processTimeout: TimeInterval = 20) {
         self.env = env
         self.fs = fs
         self.now = now
+        self.processTimeout = processTimeout
     }
 
-    /// Resolve the binary once, then connect Claude Desktop. Writes nothing when no runnable binary exists.
-    public func run(argv0: String) -> ConnectReport {
+    /// Resolve the binary once, then connect `clients` (nil = every detected client). Writes nothing when
+    /// no runnable binary exists. Fails only when a client it tried to connect couldn't be connected.
+    public func run(argv0: String, clients: [ConnectClient]?) -> ConnectReport {
         var report = ConnectReport()
         switch StableBinaryPath.resolve(argv0: argv0, cwd: env.cwd, pathEnv: env.pathEnv, home: env.home.path, fs: fs) {
         case .notRunnable(let lookedAt):
@@ -320,7 +496,19 @@ public struct Connector {
             if canMove {
                 report.messages.append("Heads-up: \(path) is inside a build folder or your Desktop, so it can move. The Homebrew install is the stable choice.")
             }
-            connectDesktop(binary: path, into: &report)
+            let requested = clients != nil
+            for client in clients ?? ConnectClient.allCases {
+                switch client {
+                case .claudeDesktop:
+                    if requested || env.desktopDetected {
+                        connectDesktop(binary: path, into: &report)
+                    } else {
+                        report.messages.append("Claude Desktop isn't installed here — skipped.")
+                    }
+                case .claudeCode:
+                    connectClaudeCode(binary: path, requested: requested, into: &report)
+                }
+            }
             return report
         }
     }
@@ -357,12 +545,88 @@ public struct Connector {
                 report.failed = true
                 return
             }
-            if !ConnectionStore.save(ConnectionRecord(client: Self.desktopClient, command: binary, connectedAt: now()),
-                                     memoriesRoot: env.memoriesRoot) {
-                report.logs.append("engram-mcp: couldn't record the connection in \(ConnectionStore.url(memoriesRoot: env.memoriesRoot).path)")
-            }
+            record(.claudeDesktop, binary, into: &report)
             report.logs.append("engram-mcp: connected → \(configPath) (command = \(binary))")
             report.messages.append("Engram is connected to Claude Desktop (\(binary)). Quit and reopen Claude Desktop to load it.")
         }
+    }
+
+    /// Register Engram at Claude Code's USER scope through the `claude` CLI (Engram never edits
+    /// ~/.claude.json itself). Only `claude mcp remove` / `claude mcp add` are ever run — never
+    /// `claude mcp get`, which launches servers to health-check them.
+    public func connectClaudeCode(binary: String, requested: Bool, into report: inout ConnectReport) {
+        let addCommand = "claude mcp add -s user engram -- \(Self.shellQuoted(binary))"
+        guard let claude = env.findExecutable("claude", fs: fs) else {
+            report.messages.append("Claude Code isn't installed here (no `claude` on PATH) — skipped. To add it later: \(addCommand)")
+            if requested { report.failed = true }   // asked for by name, and it didn't happen
+            return
+        }
+        func fail(_ reason: String) {
+            var r = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            while r.hasSuffix(".") { r.removeLast() }
+            report.logs.append("engram-mcp: Claude Code connect FAILED: \(r)")
+            report.messages.append("Couldn't connect Claude Code: \(r). Run this yourself: \(addCommand)")
+            report.failed = true
+        }
+
+        let configURL = env.claudeCodeConfigURL
+        var needsRemove = false
+        if case .entry(let e) = ClaudeCodeConfig.userEngramEntry(at: configURL) {
+            let alreadyRight = e.command == binary && e.args.isEmpty && (e.type == nil || e.type == "stdio")
+            needsRemove = !alreadyRight
+            if alreadyRight {
+                record(.claudeCode, binary, into: &report)
+                report.messages.append("Engram is connected to Claude Code (user scope). New Claude Code sessions will see it.")
+                return
+            }
+        }
+
+        var processEnv = env.variables
+        processEnv["PATH"] = env.pathEnv
+        processEnv["HOME"] = env.home.path
+
+        if needsRemove {
+            let out = ProcessRunner.run(claude, ["mcp", "remove", "engram", "-s", "user"],
+                                        environment: processEnv, timeout: processTimeout)
+            if let reason = failureReason(out, step: "claude mcp remove") { return fail(reason) }
+        }
+        let out = ProcessRunner.run(claude, ["mcp", "add", "-s", "user", "engram", "--", binary],
+                                    environment: processEnv, timeout: processTimeout)
+        if let reason = failureReason(out, step: "claude mcp add") { return fail(reason) }
+
+        guard case .entry(let e) = ClaudeCodeConfig.userEngramEntry(at: configURL), e.command == binary else {
+            return fail("`claude mcp add` finished, but \(configURL.path) doesn't show the new entry")
+        }
+        record(.claudeCode, binary, into: &report)
+        report.logs.append("engram-mcp: connected Claude Code (user scope, command = \(binary))")
+        report.messages.append("Engram is connected to Claude Code (user scope). New Claude Code sessions will see it.")
+    }
+
+    // MARK: helpers
+
+    private func record(_ client: ConnectClient, _ binary: String, into report: inout ConnectReport) {
+        if !ConnectionStore.save(ConnectionRecord(client: client.rawValue, command: binary, connectedAt: now()),
+                                 memoriesRoot: env.memoriesRoot) {
+            report.logs.append("engram-mcp: couldn't record the connection in \(ConnectionStore.url(memoriesRoot: env.memoriesRoot).path)")
+        }
+    }
+
+    /// nil when the step succeeded; otherwise a short reason for the message.
+    func failureReason(_ out: ProcessOutcome, step: String) -> String? {
+        if let e = out.launchError { return "couldn't run `\(step)` (\(e))" }
+        if out.timedOut { return "`\(step)` didn't finish within \(Int(processTimeout)) seconds" }
+        guard out.status != 0 else { return nil }
+        let firstLine = (out.stderr + "\n" + out.stdout)   // the CLI's own error, stderr first
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+        return firstLine.map { "`\(step)` said \"\($0)\"" } ?? "`\(step)` exited with status \(out.status)"
+    }
+
+    /// Quote a path for a command the user will paste, only when it needs it.
+    static func shellQuoted(_ s: String) -> String {
+        let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+@%:,=")
+        if !s.isEmpty, s.unicodeScalars.allSatisfy({ safe.contains($0) }) { return s }
+        return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
