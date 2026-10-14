@@ -70,7 +70,10 @@ struct ContentView: View {
     @State private var nav: Nav = .all
     @State private var selected: Memory? = nil      // a single memory shown in the detail panel
     @State private var selectedConv: String? = nil  // a whole conversation shown in the detail panel
-    @State private var query: String = ""
+    @State private var query: String = ""             // the Find filter (kept while in Ask, restored on switching back)
+    enum SearchMode: String { case find, ask }
+    @AppStorage("engram.searchMode") private var searchMode: SearchMode = .find
+    @State private var askEngaged = false            // Ask owns the main panel; a sidebar click hands it back to the list
     @State private var expanded: Set<String> = []   // which conversations are opened (matryoshka)
     @State private var pendingDelete: String? = nil  // single conversation awaiting delete confirmation
     @State private var selecting = false             // multi-select mode
@@ -114,6 +117,8 @@ struct ContentView: View {
         .onChange(of: nav) { _ in selecting = false; picked = []; selectingFiles = false; pickedFiles = [] }   // (openFile is reset by the nav row itself)
         .onChange(of: model.combinedFiles) { _ in pruneStaleFileSelection() }   // a conversation removed from the open file shouldn't linger selected
         .onChange(of: fileNameDraft) { v in if let f = openFile { model.renameCombinedFile(f, to: v) } }
+        .onChange(of: searchMode) { mode in askEngaged = (mode == .ask) }   // Find shows the list again, with its own text
+        .onChange(of: model.recallQuery) { v in if searchMode == .ask && !v.isEmpty { askEngaged = true } }
         .sheet(item: $combineSheet) { cfg in
             CombineSheet(editingFileID: cfg.editingFileID, name: cfg.name, picked: cfg.preselected) { newID in
                 combineSheet = nil
@@ -127,7 +132,7 @@ struct ContentView: View {
         .alert("Add an AI", isPresented: $showAddSource) {
             TextField("AI name (e.g. Mistral)", text: $newSourceName)
             Button("Add") {
-                if let key = model.addCustomSource(name: newSourceName) { nav = .source(key); selected = nil }
+                if let key = model.addCustomSource(name: newSourceName) { leaveAsk(); nav = .source(key); selected = nil }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -181,6 +186,7 @@ struct ContentView: View {
     /// Also lands us in the Collective Mind section, so "Combine into file…" from a source view jumps
     /// straight into the file it just made.
     private func openCombinedFile(_ id: String) {
+        leaveAsk()
         nav = .collective
         openFile = id
         fileNameDraft = model.combinedFile(id)?.name ?? ""
@@ -219,8 +225,29 @@ struct ContentView: View {
                 .allowsHitTesting(false)   // pressing the title drags too (caught by the background)
             Spacer()
             HStack(spacing: 6) {
+                Picker("", selection: $searchMode) {
+                    Text("Find").tag(SearchMode.find)
+                    Text("Ask").tag(SearchMode.ask)
+                }
+                .pickerStyle(.segmented).labelsHidden().controlSize(.mini).frame(width: 90)
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search", text: $query).textFieldStyle(.plain).frame(width: 220)
+                TextField(searchMode == .ask ? "Ask your memory" : "Search",
+                          text: searchMode == .ask ? $model.recallQuery : $query)
+                    .textFieldStyle(.plain).frame(width: 220)
+                    .onSubmit {   // Ask runs only on Return, never while typing
+                        guard searchMode == .ask else { return }
+                        askEngaged = true
+                        model.runRecall()
+                    }
+                    .onExitCommand {   // Esc clears the question and stays in Ask
+                        guard searchMode == .ask else { return }
+                        model.recallQuery = ""
+                        model.clearRecall()
+                        askEngaged = true
+                    }
+                    .overlay(alignment: .trailing) {
+                        if model.recallRunning { ProgressView().controlSize(.small) }
+                    }
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
             .liquidPanel(corner: 10, frost: glassFrost, matte: matte)
@@ -274,7 +301,7 @@ struct ContentView: View {
                               if nav == .source(c.id) { nav = .all }
                               model.removeCustomSource(c.id)
                           } : nil) {
-                    nav = .source(c.id); selected = nil
+                    leaveAsk(); nav = .source(c.id); selected = nil
                 }
             }
             actionRow("Add AI", symbol: "plus.circle") { newSourceName = ""; showAddSource = true }
@@ -294,7 +321,7 @@ struct ContentView: View {
 
     private func navRow(_ title: String, symbol: String? = nil, dot: Color? = nil,
                         nav target: Nav, count: Int? = nil, dim: Bool = false) -> some View {
-        Button { nav = target; selected = nil; openFile = nil } label: {   // tapping a section always returns to its top
+        Button { leaveAsk(); nav = target; selected = nil; openFile = nil } label: {   // tapping a section always returns to its top
             HStack(spacing: 10) {
                 if let symbol { Image(systemName: symbol).frame(width: 18) }
                 if let dot { Circle().fill(dot).frame(width: 10, height: 10) }
@@ -543,7 +570,7 @@ struct ContentView: View {
     private var mainPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             mainHeader
-            if selecting && showsConversationList { bulkBar }
+            if selecting && showsConversationList && !askShowing { bulkBar }
             mainContent
         }
         .padding(18)
@@ -616,7 +643,14 @@ struct ContentView: View {
     // MARK: Main panel header + content
 
     @ViewBuilder private var mainHeader: some View {
-        if nav == .collective, openFile == nil {
+        if askShowing {
+            if model.recallAsked != nil {   // a question was answered (Export and Select don't apply here)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Closest memories").font(.title3.weight(.medium))
+                    Text("Across all conversations").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } else if nav == .collective, openFile == nil {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Text("Collective Mind").font(.title3.weight(.medium))
@@ -693,7 +727,9 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var mainContent: some View {
-        if nav == .collective, openFile == nil {
+        if askShowing {
+            askContent
+        } else if nav == .collective, openFile == nil {
             combinedFilesHub
         } else if nav == .collective, let fid = openFile, collectiveMerged {
             wovenFileView(fid)
@@ -724,6 +760,48 @@ struct ContentView: View {
         }
     }
 
+    // MARK: Ask
+
+    /// Ask owns the main panel: the hint, the ranked results, or "nothing matches".
+    private var askShowing: Bool { searchMode == .ask && askEngaged }
+
+    /// The Find filter text, only while in Find. (Ask keeps its own question in model.recallQuery.)
+    private var findQuery: String { searchMode == .find ? query : "" }
+
+    /// The answer to the last question: the closest memories, ranked, not grouped.
+    @ViewBuilder private var askContent: some View {
+        let live = Set(model.memories.map { $0.id })
+        let hits = model.recallResults.filter { live.contains($0.memory.id) }   // one forgotten since stays gone
+        if model.recallAsked == nil {
+            Spacer()
+            Text("Ask in plain words, like “what database do we use?”, then press Return.")
+                .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+            Spacer()
+        } else if hits.isEmpty {
+            Spacer()
+            Text("Nothing in your memory matches that.")
+                .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+            Spacer()
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(hits, id: \.memory.id) { memoryCard($0.memory, showConversation: true) }
+                }
+                .padding(.horizontal, 10)   // room for the magnify to grow into (no clip)
+            }
+        }
+    }
+
+    /// A sidebar click hands the main panel back to the list: it clears the Ask question and keeps the mode.
+    private func leaveAsk() {
+        guard searchMode == .ask else { return }
+        model.recallQuery = ""
+        model.clearRecall()
+        askEngaged = false
+    }
+
     // Bulk action bar shown above the list in multi-select mode.
     private var bulkBar: some View {
         let allIDs = grouped.map { $0.0 }
@@ -749,7 +827,7 @@ struct ContentView: View {
     }
 
     /// When searching, everything is shown expanded; otherwise a conversation is collapsed until clicked.
-    private func isExpanded(_ conv: String) -> Bool { !query.isEmpty || expanded.contains(conv) }
+    private func isExpanded(_ conv: String) -> Bool { !findQuery.isEmpty || expanded.contains(conv) }
 
     // A conversation collapses to ONE row (file name + chunk count). Click the row → it opens into its
     // pieces (matryoshka). The Collective Mind toggle lives on the right, separate from the disclosure.
@@ -765,7 +843,7 @@ struct ContentView: View {
             } else {
                 // ONLY this chevron opens/closes the matryoshka — clicking the row never expands.
                 Button {
-                    guard query.isEmpty else { return }
+                    guard findQuery.isEmpty else { return }
                     withAnimation(.easeInOut(duration: 0.22)) {
                         if expanded.contains(conv) { expanded.remove(conv) } else { expanded.insert(conv) }
                     }
@@ -808,14 +886,16 @@ struct ContentView: View {
         }
     }
 
-    private func memoryCard(_ m: Memory) -> some View {
+    private func memoryCard(_ m: Memory, showConversation: Bool = false) -> some View {
         Button { selected = m } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Text(m.content).font(.system(size: 13)).lineLimit(2).multilineTextAlignment(.leading)
                 HStack(spacing: 5) {
                     Circle().fill(sourceColor(m.source)).frame(width: 7, height: 7)   // which AI — shows the fusion
-                    Text("\(label(m.source)) · \(m.updatedAt.formatted(date: .abbreviated, time: .omitted))")
+                    Text("\(label(m.source)) · \(m.updatedAt.formatted(date: .abbreviated, time: .omitted))"
+                         + (showConversation ? " · \(m.conversationID)" : ""))   // Ask results aren't grouped, so say where
                         .font(.caption2).foregroundStyle(.secondary)
+                        .lineLimit(showConversation ? 1 : nil).truncationMode(.middle)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -947,7 +1027,7 @@ struct ContentView: View {
         case .source(let id):
             base = model.allCircles.first { $0.id == id }.map { model.memories(forCircle: $0) } ?? []
         }
-        if !query.isEmpty { base = base.filter { $0.content.localizedCaseInsensitiveContains(query) } }
+        if !findQuery.isEmpty { base = base.filter { $0.content.localizedCaseInsensitiveContains(findQuery) } }
         return base.sorted { $0.updatedAt > $1.updatedAt }
     }
 

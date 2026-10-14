@@ -14,8 +14,11 @@ final class AppModel: ObservableObject {
     @Published var sources: [String] = []          // which AIs have written memories
     @Published var sourceFilter: String? = nil     // nil = all AIs
     @Published var keyword: String = ""            // browse keyword filter
-    @Published var recallQuery: String = ""        // collective-mind semantic query
+    @Published var recallQuery: String = ""        // collective-mind semantic query (the Ask field)
     @Published var recallResults: [RecallHit] = []
+    @Published var recallRunning = false           // Ask: a question is being answered (spinner in the field)
+    @Published var recallAsked: String? = nil      // Ask: the question recallResults answer (nil = nothing asked yet)
+    private var recallGeneration = 0               // bumped on every ask/clear, so a stale recall never lands
     @Published var storePath: String = ""          // shown in the UI ("your data is right here")
     @Published var combinedFiles: [CombinedFile] = []   // the user's named woven files (zero, one, or many)
     @Published var customSources: [CustomSource] = []   // AIs the user added beyond the built-in six
@@ -345,12 +348,32 @@ final class AppModel: ObservableObject {
         try? text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Ask: recall the 10 closest memories across every conversation for the Ask field's question, with
+    /// today's relevance floor. Runs only when asked (Return), never while typing.
     func runRecall() {
-        guard let engine, !recallQuery.trimmingCharacters(in: .whitespaces).isEmpty else {
-            recallResults = []
-            return
+        let question = recallQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { clearRecall(); return }
+        guard let engine else { return }   // the store is still loading; stay idle rather than claim no match
+        recallGeneration += 1
+        let generation = recallGeneration
+        recallRunning = true
+        Task { @MainActor in
+            // Give the spinner a frame to draw. The recall itself stays on the main actor, where the engine
+            // lives: reading the index from another thread while a delete or import changes it isn't safe.
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            guard generation == self.recallGeneration else { return }
+            self.recallResults = engine.recall(question, scope: .all, k: 10)
+            self.recallAsked = question
+            self.recallRunning = false
         }
-        recallResults = engine.recall(recallQuery, scope: .all, k: 10)
+    }
+
+    /// Back to "nothing asked": no results, no spinner, and any recall still in flight is dropped.
+    func clearRecall() {
+        recallGeneration += 1
+        recallResults = []
+        recallAsked = nil
+        recallRunning = false
     }
 }
 
