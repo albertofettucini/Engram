@@ -1,5 +1,6 @@
 <h3>Engram 0.1.1</h3>
 <ul>
+<li><strong>Upgrading from 0.1.0?</strong> Run <code>engram-mcp --connect</code> once, because 0.1.0 pointed Claude at a path that <code>brew upgrade</code> removes. <code>engram-mcp --doctor</code> tells you if anything is still off.</li>
 <li>Fixed: <code>engram-mcp --connect</code> could write a path that didn't exist, or one the next <code>brew upgrade</code> would delete. It now writes the stable Homebrew path and refuses to write a broken one.</li>
 <li><code>--connect</code> now sets up Claude Code too.</li>
 <li>New: <code>engram-mcp --doctor</code> checks your setup and tells you how to fix anything that's off.</li>
