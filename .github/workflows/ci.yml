@@ -1,0 +1,135 @@
+name: CI
+
+# Every push and pull request to main: build each product, run the tests, then smoke-test the built
+# engram-mcp the way a user meets it (--connect, the stdio protocol, --doctor). Everything runs against
+# scratch folders under $RUNNER_TEMP with a scratch HOME and a PATH without `claude`, so no real Claude
+# config or CLI is ever touched. The release workflow is only run on a commit whose CI is green.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # xcode-27 = macOS 27 + the Xcode 27 SDK (public-preview label), the same runner the release uses.
+    # The app's Liquid Glass path (`glassEffect`) needs the macOS 26 SDK or newer to compile.
+    runs-on: xcode-27
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain + version
+        run: |
+          swift --version
+          xcodebuild -version || true
+          V="$(sed -n 's/.*public static let current = "\(.*\)".*/\1/p' Sources/Engram/Version.swift)"
+          if [ -z "$V" ]; then echo "::error::could not read EngramVersion.current from Sources/Engram/Version.swift"; exit 1; fi
+          echo "Engram $V"
+          echo "ENGRAM_VERSION=$V" >> "$GITHUB_ENV"
+          echo "SMOKE=$RUNNER_TEMP/engram-smoke" >> "$GITHUB_ENV"
+
+      - name: Build each product
+        run: |
+          for p in engram-mcp engram-capture engram-app; do
+            swift build --product "$p"
+          done
+          echo "BIN=$(swift build --show-bin-path)" >> "$GITHUB_ENV"
+
+      - name: Unit tests
+        run: |
+          T="$RUNNER_TEMP/engram-tests"
+          mkdir -p "$T"
+          ENGRAM_ROOT="$T/memories" \
+          ENGRAM_CLAUDE_CONFIG="$T/claude_desktop_config.json" \
+          ENGRAM_CLAUDE_CODE_CONFIG="$T/claude.json" \
+          ENGRAM_CLAUDE_LOGS="$T/logs" \
+            swift test
+
+      # The smoke steps share one scratch machine in $SMOKE: a HOME, a store, Claude Desktop's config, a
+      # Claude Code config that doesn't exist, and a logs folder.
+      - name: Smoke test --connect
+        run: |
+          rm -rf "$SMOKE"
+          mkdir -p "$SMOKE/home" "$SMOKE/cwd"
+          cd "$SMOKE/cwd"   # a folder that is not the binary's, so a cwd + argv0 path would be wrong
+          env -i HOME="$SMOKE/home" PATH="$BIN:/usr/bin:/bin" \
+            ENGRAM_ROOT="$SMOKE/memories" \
+            ENGRAM_CLAUDE_CONFIG="$SMOKE/claude_desktop_config.json" \
+            ENGRAM_CLAUDE_CODE_CONFIG="$SMOKE/claude.json" \
+            ENGRAM_CLAUDE_LOGS="$SMOKE/logs" \
+            engram-mcp --connect claude-desktop
+          python3 - "$SMOKE/claude_desktop_config.json" <<'PY'
+          import json, os, sys
+          cmd = json.load(open(sys.argv[1]))["mcpServers"]["engram"]["command"]
+          assert os.path.isabs(cmd), "not an absolute path: %s" % cmd
+          assert os.path.isfile(cmd) and os.access(cmd, os.X_OK), "not executable: %s" % cmd
+          print("--connect wrote", cmd)
+          PY
+
+      - name: Smoke test stdio (initialize + tools/list)
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01","capabilities":{},"clientInfo":{"name":"engram-ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | env -i HOME="$SMOKE/home" PATH="/usr/bin:/bin" ENGRAM_ROOT="$SMOKE/memories" "$BIN/engram-mcp" \
+            > "$SMOKE/stdio.jsonl"
+          python3 - "$SMOKE/stdio.jsonl" "$ENGRAM_VERSION" <<'PY'
+          import json, sys
+          msgs = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+          by_id = {m.get("id"): m for m in msgs}
+          init = by_id[1]["result"]
+          assert init["serverInfo"]["version"] == sys.argv[2], init["serverInfo"]
+          assert init.get("instructions"), "initialize sent no instructions"
+          assert init["protocolVersion"] == "2025-11-25", init["protocolVersion"]
+          names = sorted(t["name"] for t in by_id[2]["result"]["tools"])
+          assert names == ["recall", "remember"], names
+          print("stdio ok:", init["serverInfo"], init["protocolVersion"])
+          PY
+
+      - name: Smoke test --doctor
+        run: |
+          doctor() {
+            env -i HOME="$SMOKE/home" PATH="$BIN:/usr/bin:/bin" \
+              ENGRAM_ROOT="$SMOKE/memories" \
+              ENGRAM_CLAUDE_CONFIG="$SMOKE/claude_desktop_config.json" \
+              ENGRAM_CLAUDE_CODE_CONFIG="$SMOKE/claude.json" \
+              ENGRAM_CLAUDE_LOGS="$SMOKE/logs" \
+              engram-mcp --doctor
+          }
+          snapshot() { find "$SMOKE" -print0 | xargs -0 stat -f '%N %z %m' | sort; }
+          OUT="$RUNNER_TEMP/engram-doctor"   # outside $SMOKE, so writing these never changes the snapshot
+          mkdir -p "$OUT"
+
+          # Connected (a .build path, so only a "can move" warning) and a store: no problems, exit 0.
+          snapshot > "$OUT/before.txt"
+          doctor | tee "$OUT/ok.txt"
+          snapshot > "$OUT/after.txt"
+          diff "$OUT/before.txt" "$OUT/after.txt" || { echo "::error::--doctor changed files"; exit 1; }
+          grep -qx "Engram doctor ($ENGRAM_VERSION)" "$OUT/ok.txt"
+          grep -qx "All good." "$OUT/ok.txt"
+
+          # Entry removed after a --connect (its connection record is there): a problem line and exit 1.
+          python3 - "$SMOKE/claude_desktop_config.json" <<'PY'
+          import json, sys
+          path = sys.argv[1]
+          config = json.load(open(path))
+          del config["mcpServers"]["engram"]
+          json.dump(config, open(path, "w"))
+          PY
+          set +e
+          doctor > "$OUT/dropped.txt"
+          code=$?
+          set -e
+          cat "$OUT/dropped.txt"
+          if [ "$code" -ne 1 ]; then echo "::error::--doctor exited $code with the entry gone, expected 1"; exit 1; fi
+          grep -q "✗ Claude Desktop   Engram was connected before" "$OUT/dropped.txt"
+          grep -qx "1 problem found." "$OUT/dropped.txt"
