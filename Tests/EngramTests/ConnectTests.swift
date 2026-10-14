@@ -10,7 +10,7 @@ final class ConnectTests: XCTestCase {
 
     override func setUpWithError() throws {
         tmp = FileManager.default.temporaryDirectory.appendingPathComponent("engram-connect-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: claudeJSON.deletingLastPathComponent(), withIntermediateDirectories: true)
     }
 
     override func tearDownWithError() throws {
@@ -55,14 +55,16 @@ final class ConnectTests: XCTestCase {
                                applicationsDirs: [tmp.appendingPathComponent("Applications").path])
     }
 
-    private var claudeJSON: URL { tmp.appendingPathComponent("fake-claude.json") }
+    /// Named .claude.json like the real file: --connect points the CLI here through CLAUDE_CONFIG_DIR.
+    private var claudeJSON: URL { tmp.appendingPathComponent("code-config/.claude.json") }
     private var claudeLog: URL { tmp.appendingPathComponent("fake-claude-argv.log") }
     private var fakeBin: String { tmp.appendingPathComponent("fakebin").path }
 
-    /// A fake `claude` on a temp PATH: logs "<cwd>|<argv>" and edits a fake config the way the real CLI
-    /// would. `behavior` swaps in a failing, lying or hanging CLI. CI never calls a real `claude`.
+    /// A fake `claude` on a temp PATH: logs "<cwd>|<argv>" and edits $CLAUDE_CONFIG_DIR/.claude.json the
+    /// way the real CLI would (so a test fails if --connect doesn't point the CLI at the scratch config).
+    /// `behavior` swaps in a failing, lying or hanging CLI. CI never calls a real `claude`.
     private func installFakeClaude(_ behavior: String = "ok") throws {
-        let config = claudeJSON.path, log = claudeLog.path
+        let config = "$CLAUDE_CONFIG_DIR/.claude.json", log = claudeLog.path
         let body: String
         switch behavior {
         case "fail":  body = "echo 'MCP server engram already exists in user config.' >&2; exit 1"
@@ -71,8 +73,8 @@ final class ConnectTests: XCTestCase {
         default:
             body = """
             case "$1 $2" in
-              "mcp add") printf '{"mcpServers":{"engram":{"type":"stdio","command":"%s","args":[],"env":{}}},"numStartups":3}' "$7" > '\(config)' ;;
-              "mcp remove") printf '{"mcpServers":{},"numStartups":3}' > '\(config)' ;;
+              "mcp add") printf '{"mcpServers":{"engram":{"type":"stdio","command":"%s","args":[],"env":{}}},"numStartups":3}' "$7" > "\(config)" ;;
+              "mcp remove") printf '{"mcpServers":{},"numStartups":3}' > "\(config)" ;;
               *) echo "unexpected: $*" >&2; exit 3 ;;
             esac
             """
@@ -299,6 +301,39 @@ final class ConnectTests: XCTestCase {
         XCTAssertFalse(report.failed)
         XCTAssertEqual(claudeCalls().map { $0.argv }, ["mcp remove engram -s user", "mcp add -s user engram -- \(binary)"])
         XCTAssertEqual(report.messages, [codeSuccess])
+    }
+
+    /// Scratch-config runs must never reach the user's real Claude Code config: the CLI is pointed at
+    /// the override through CLAUDE_CONFIG_DIR (even over a CLAUDE_CONFIG_DIR already set), and an
+    /// override the CLI can't be pointed at means the CLI isn't run at all.
+    func testOverrideConfigIsWhereTheCLIWrites() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude()
+        let realDir = tmp.appendingPathComponent("real-claude-dir")
+        var e = env(path: fakeBin)
+        e.variables["CLAUDE_CONFIG_DIR"] = realDir.path
+        let report = Connector(env: e).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertFalse(report.failed)
+        XCTAssertEqual(report.messages, [codeSuccess])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: realDir.appendingPathComponent(".claude.json").path))
+        guard case .entry(let entry) = ClaudeCodeConfig.userEngramEntry(at: claudeJSON) else {
+            return XCTFail("the scratch config should hold the new entry")
+        }
+        XCTAssertEqual(entry.command, binary)
+    }
+
+    func testOverrideNotNamedClaudeJSONRunsNoCLI() throws {
+        let binary = try makeFile("bin/engram-mcp")
+        try installFakeClaude()
+        let other = tmp.appendingPathComponent("claude.json")
+        var e = env(path: fakeBin)
+        e.variables["ENGRAM_CLAUDE_CODE_CONFIG"] = other.path
+        let report = Connector(env: e).run(argv0: binary, clients: [.claudeCode])
+        XCTAssertTrue(report.failed)
+        XCTAssertTrue(claudeCalls().isEmpty)
+        XCTAssertEqual(report.messages, [
+            "Couldn't connect Claude Code: ENGRAM_CLAUDE_CODE_CONFIG points at \(other.path), and `claude` only writes a file named .claude.json, so I didn't run it. Run this yourself: claude mcp add -s user engram -- \(binary)",
+        ])
     }
 
     func testMatchingEntryNeedsNoCLICall() throws {

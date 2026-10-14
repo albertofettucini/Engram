@@ -71,7 +71,9 @@ public struct HostEnvironment {
     }
 
     /// Claude Code's user-scope config, read-only for Engram (only the `claude` CLI writes it).
-    /// ENGRAM_CLAUDE_CODE_CONFIG overrides; CLAUDE_CONFIG_DIR moves it the same way it moves it for Claude Code.
+    /// ENGRAM_CLAUDE_CODE_CONFIG overrides (and --connect then points the `claude` CLI at it through
+    /// CLAUDE_CONFIG_DIR, so it must name a .claude.json file); CLAUDE_CONFIG_DIR moves it the same way
+    /// it moves it for Claude Code.
     public var claudeCodeConfigURL: URL {
         if let p = override("ENGRAM_CLAUDE_CODE_CONFIG") { return URL(fileURLWithPath: p) }
         if let dir = override("CLAUDE_CONFIG_DIR") { return URL(fileURLWithPath: dir).appendingPathComponent(".claude.json") }
@@ -593,6 +595,15 @@ public struct Connector {
         var processEnv = env.variables
         processEnv["PATH"] = env.pathEnv
         processEnv["HOME"] = env.home.path
+        // ENGRAM_CLAUDE_CODE_CONFIG moves where Engram reads; the CLI has to write that same file, or
+        // a scratch run would edit the user's real ~/.claude.json. Claude Code only writes
+        // <CLAUDE_CONFIG_DIR>/.claude.json, so point it there — or don't run it at all.
+        if env.override("ENGRAM_CLAUDE_CODE_CONFIG") != nil {
+            guard configURL.lastPathComponent == ".claude.json" else {
+                return fail("ENGRAM_CLAUDE_CODE_CONFIG points at \(configURL.path), and `claude` only writes a file named .claude.json, so I didn't run it")
+            }
+            processEnv["CLAUDE_CONFIG_DIR"] = configURL.deletingLastPathComponent().path
+        }
 
         if needsRemove {
             let out = ProcessRunner.run(claude, ["mcp", "remove", "engram", "-s", "user"],
