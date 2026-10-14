@@ -576,8 +576,10 @@ struct ContentView: View {
         .padding(18)
         .frame(maxHeight: .infinity, alignment: .top)
         .liquidPanel(corner: 18, frost: glassFrost, matte: matte)
-        .overlay(alignment: .bottom) { importToast }
-        .animation(.easeInOut(duration: 0.15), value: model.lastImport?.id)   // fades in (and out) over 0.15 s
+        .overlay(alignment: .bottom) {
+            ZStack { importToast }   // the fade is scoped here, so the list refresh beside it doesn't animate
+                .animation(.easeInOut(duration: 0.15), value: model.lastImport?.id)   // fades in (and out) over 0.15 s
+        }
         .confirmationDialog("Forget this conversation?",
                             isPresented: Binding(get: { pendingDelete != nil },
                                                  set: { if !$0 { pendingDelete = nil } }),
