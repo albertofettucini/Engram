@@ -10,9 +10,9 @@
 class Engram < Formula
   desc "Local, on-device memory for your AIs (MCP server)"
   homepage "https://github.com/albertofettucini/Engram"
-  url "https://github.com/albertofettucini/Engram/releases/download/v0.1.0/engram-cli-macos-universal.tar.gz"
-  version "0.1.0"
-  sha256 "9db484dc99ab66090c832bcad50fb55de60dc7014474764708f2e124b9483817"
+  url "https://github.com/albertofettucini/Engram/releases/download/v0.1.1/engram-cli-macos-universal.tar.gz"
+  version "0.1.1"
+  sha256 "18b55511395a7c4f72ddd6b8e8843155f55e104df0db61c37661a1542cfbf9f3"
   license "MIT"
 
   # The CLI tools target macOS 13+. (The GUI app is a separate download and targets macOS 14+.)
