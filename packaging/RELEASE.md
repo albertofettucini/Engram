@@ -64,28 +64,13 @@ in `Info.plist`), the **CLI/library** target **macOS 13+** (`platforms: [.macOS(
 
 ## Cutting a release
 
-1. Make sure `main` builds and the version is what you want. The workflow stamps
-   `CFBundleShortVersionString` from the tag and `CFBundleVersion` from the git commit count
-   (monotonic — required for Sparkle to recognise a newer build), so you don't edit `Info.plist`.
+1. Set `EngramVersion.current` in `Sources/Engram/Version.swift` and add `packaging/release-notes/<version>.html`. The release fails if the tag and the constant differ.
+2. Run the scan on tracked files: `git ls-files -z | xargs -0 grep -IE -f ~/.config/council-release/secret-patterns.txt` must print nothing, and `git log origin/main..HEAD --format='%an %ae'` must show only Joseph. Then run `swift test`.
+3. Push main and wait for CI to go green (`gh run watch`). Then push **only** the new tag: `git tag v<x.y.z> && git push origin v<x.y.z>`. Never use `--tags`.
+4. Bump the tap in a dedicated clone with Joseph as the local identity, never in Homebrew's own tap folder: `bash packaging/bump-formula.sh <x.y.z> ~/Developer/homebrew-engram`. Review the diff, commit and push the tap.
+5. Verify: `brew upgrade albertofettucini/engram/engram && brew test albertofettucini/engram/engram && engram-mcp --doctor`.
 
-2. Tag and push:
-
-   ```sh
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
-
-   The workflow runs and publishes the GitHub Release.
-
-3. **Update the Homebrew formula.** From the release, copy the printed SHA256 of
-   `engram-cli-macos-universal.tar.gz` (also attached as `…​.sha256`). In
-   `packaging/homebrew/engram.rb` bump `url`, `version`, and `sha256`, then copy the file into the tap
-   repo as `Formula/engram.rb` and push. Verify:
-
-   ```sh
-   brew install albertofettucini/engram/engram
-   engram-mcp --connect
-   ```
+If the `xcode-27` runner is unavailable: Actions → Release → Run workflow, with `runner: macos-26` and the tag.
 
 ---
 
