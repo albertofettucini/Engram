@@ -301,7 +301,7 @@ final class AppModel: ObservableObject {
         let modeLabel = NSTextField(labelWithString: "Keep:")
         modeLabel.frame = NSRect(x: 12, y: 12, width: 78, height: 18)
         let modePopup = NSPopUpButton(frame: NSRect(x: 92, y: 8, width: 240, height: 26))
-        modePopup.addItems(withTitles: ["Key facts only", "Everything"])   // Key facts = default (first item)
+        modePopup.addItems(withTitles: ["Everything", "Key facts only"])   // Everything = default (first item)
         let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 78))
         accessory.addSubview(label); accessory.addSubview(popup)
         accessory.addSubview(modeLabel); accessory.addSubview(modePopup)
@@ -316,7 +316,7 @@ final class AppModel: ObservableObject {
         if #available(macOS 11.0, *) { panel.isAccessoryViewDisclosed = true }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let source = choices[max(0, popup.indexOfSelectedItem)].source
-        let distill = modePopup.indexOfSelectedItem == 0   // "Key facts only" (default)
+        let distill = modePopup.indexOfSelectedItem == 1   // "Key facts only"
 
         let importer = MarkdownImporter(engine: engine)
         if url.hasDirectoryPath {

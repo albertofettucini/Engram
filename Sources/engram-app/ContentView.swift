@@ -1160,7 +1160,7 @@ private struct PasteSheet: View {
     @State private var title = ""
     @State private var source = "chatgpt"
     @State private var text = ""
-    @State private var distill = true
+    @State private var distill = false   // Everything by default, like the file import
     let onDone: () -> Void
 
     private var sourceTitle: String { model.importSourceChoices.first { $0.source == source }?.title ?? "Other" }
