@@ -1,12 +1,12 @@
 # Releasing Engram
 
 The release is automated by [`.github/workflows/release.yml`](../.github/workflows/release.yml): push a
-SemVer tag and it builds the universal CLI binaries, the unsigned app, signs the app archive for
+SemVer tag and it builds the universal CLI binaries, the ad-hoc signed app, signs the app archive for
 Sparkle, regenerates the appcast, and publishes a GitHub Release with everything attached.
 
-Nothing here needs a paid Apple Developer cert. The app ships **unsigned** (Gatekeeper right-click →
-Open). The only secret is the Sparkle EdDSA **private key**, which lives as a CI secret and never enters
-the repo or history.
+Nothing here needs a paid Apple Developer cert. The app is ad-hoc signed, not notarized, so the first
+launch needs System Settings → Privacy & Security → Open Anyway. The only secret is the Sparkle EdDSA
+**private key**, which lives as a CI secret and never enters the repo or history.
 
 ---
 
@@ -14,7 +14,7 @@ the repo or history.
 
 | Asset | What it is | How users get it |
 |---|---|---|
-| `Engram-<v>.zip` | the unsigned, universal GUI app | release download |
+| `Engram-<v>.zip` | the ad-hoc signed (not notarized), universal GUI app | release download |
 | `engram-cli-macos-universal.tar.gz` | `engram-mcp` + `engram-capture` (universal) | `brew install` (and direct download) |
 | `*.sha256` | checksums | verification |
 | `appcast.xml` | the Sparkle feed | the app's "Check for Updates" |

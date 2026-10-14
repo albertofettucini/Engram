@@ -1,10 +1,11 @@
 name: Release
 
 # Triggered by pushing a SemVer tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
-# Builds the universal CLI binaries + the unsigned app, signs the app archive for Sparkle, regenerates
-# the appcast, and publishes a GitHub Release with everything attached. Nothing here needs a paid Apple
-# cert: the app ships UNSIGNED (Gatekeeper right-click-Open), and the only secret is the Sparkle EdDSA
-# private key (SPARKLE_ED_PRIVATE_KEY) used to sign update archives — it never lands in the repo.
+# Builds the universal CLI binaries + the app, signs the app archive for Sparkle, regenerates the
+# appcast, and publishes a GitHub Release with everything attached. Nothing here needs a paid Apple
+# cert: the app is ad-hoc signed, not notarized (first launch: System Settings → Privacy & Security →
+# Open Anyway), and the only secret is the Sparkle EdDSA private key (SPARKLE_ED_PRIVATE_KEY) used to
+# sign update archives — it never lands in the repo.
 
 on:
   push:
@@ -63,8 +64,8 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf engram-cli-macos-universal.tar.gz engram-mcp engram-capture
           shasum -a 256 engram-cli-macos-universal.tar.gz | tee engram-cli-macos-universal.tar.gz.sha256
 
-      # ---------- the GUI app (unsigned, universal) ----------
-      - name: Build Engram.app (universal, unsigned)
+      # ---------- the GUI app (ad-hoc signed, not notarized, universal) ----------
+      - name: Build Engram.app (universal, ad-hoc signed)
         env:
           SWIFT_BUILD_FLAGS: "--arch arm64 --arch x86_64"
           OUT_DIR: "dist"

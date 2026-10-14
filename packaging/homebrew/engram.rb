@@ -2,13 +2,13 @@
 #
 # The live formula lives in the tap repo `albertofettucini/homebrew-engram` as `Formula/engram.rb`
 # (so `brew install albertofettucini/engram/engram` works). This copy is the source of truth; on each
-# release, bump `url` + `version` and paste the new `sha256` (printed by the release workflow as
-# `engram-cli-macos-universal.tar.gz.sha256`), then copy it into the tap.
+# release, `packaging/bump-formula.sh` sets `url`, `version` and `sha256` here and in the tap clone
+# (see packaging/RELEASE.md).
 #
 # It installs the PREBUILT universal CLI binaries from the GitHub Release — no Swift toolchain, no
-# compile wait. The desktop app is a separate, unsigned download (see caveats).
+# compile wait. The desktop app is a separate download, ad-hoc signed, not notarized (see caveats).
 class Engram < Formula
-  desc "One shared local memory for your AIs — MCP server + Claude Code auto-capture"
+  desc "Local, on-device memory for your AIs (MCP server)"
   homepage "https://github.com/albertofettucini/Engram"
   url "https://github.com/albertofettucini/Engram/releases/download/v0.1.0/engram-cli-macos-universal.tar.gz"
   version "0.1.0"
@@ -25,14 +25,15 @@ class Engram < Formula
 
   def caveats
     <<~EOS
-      Connect Engram's memory to Claude Desktop / Claude Code (MCP):
+      Connect Engram to Claude Desktop and Claude Code:
         engram-mcp --connect
-        engram-mcp --prepare-embeddings   # optional, one-time on-device model for better recall
+      Check the setup any time:
+        engram-mcp --doctor
+      Optional, one-time on-device model for better recall:
+        engram-mcp --prepare-embeddings
 
-      Auto-capture durable facts from your Claude Code chats:
-        engram-capture --watch
-
-      The desktop app (memory viewer) is a separate, unsigned download:
+      The desktop app (memory viewer) is a separate download. It isn't notarized, so the
+      first launch needs System Settings → Privacy & Security → Open Anyway:
         https://github.com/albertofettucini/Engram/releases/latest
     EOS
   end

@@ -32,9 +32,7 @@ readable, greppable, editable, deletable. **Nothing is ever uploaded.**
 - **One memory, many minds.** A single store every MCP client reads from and writes to. "Collective
   mind" recall (`.all`) searches across all your conversations at once; or scope recall to a single
   conversation, or to one named file you've grouped.
-- **Bring your history in.** Import a ChatGPT / Claude export, Markdown/text/JSON, or paste — and
-  choose **Key facts** (keep only the durable things *you* said) or **Everything**. Auto-capture from
-  Claude Code transcripts is built in (opt-in).
+- **Bring your history in.** Import a ChatGPT / Claude export, Markdown/text/JSON, or paste. Engram keeps **Everything** by default, or just the **Key facts** you said. It tells you how many came in.
 - **Semantic recall, on device.** Embeddings run locally via Apple's Natural Language framework (an
   optional one-time download upgrades to the contextual transformer). No model server, no network for
   recall.
@@ -45,23 +43,27 @@ readable, greppable, editable, deletable. **Nothing is ever uploaded.**
 
 ## Install
 
-**Homebrew** — the MCP server + capture CLI, the fastest path:
+**Homebrew**: the MCP server, the fastest path:
 
 ```sh
 brew install albertofettucini/engram/engram
-engram-mcp --connect                 # register Engram with Claude Desktop, then restart it
-engram-mcp --prepare-embeddings      # optional: one-time on-device model for better recall
-engram-capture --watch               # optional: auto-capture durable facts from Claude Code
+engram-mcp --connect      # adds Engram to Claude Desktop and Claude Code
+engram-mcp --doctor       # checks the setup; run it any time something feels off
 ```
 
-**The desktop app** — to browse, edit, and import your memories: grab `Engram-<version>.zip` from the
-[latest release](https://github.com/albertofettucini/Engram/releases/latest), unzip, drag it to
-Applications, then **right-click → Open** the first time. The app is unsigned (no paid Apple cert), so
-Gatekeeper asks once; after that it opens normally.
+Quit and reopen Claude Desktop afterwards. `--connect` writes the stable Homebrew path (`/opt/homebrew/bin/engram-mcp`), so `brew upgrade` never breaks it.
 
-**Connect any MCP client.** Anything that speaks MCP reads and writes the same store. `--connect` writes
-the Claude Desktop config for you; to wire another client by hand, point it at the `engram-mcp` binary
-(`which engram-mcp` — usually `/opt/homebrew/bin` on Apple Silicon, `/usr/local/bin` on Intel):
+Optional: `engram-mcp --prepare-embeddings` does a one-time download of Apple's on-device model for better recall.
+
+**The desktop app**, to browse, edit and import your memories: grab `Engram-<version>.zip` from the [latest release](https://github.com/albertofettucini/Engram/releases/latest), unzip it, and drag it to Applications. The app isn't notarized (no paid Apple cert), so macOS blocks the first launch. Open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. After that it opens normally.
+
+**Connect another MCP client.** Point it at `which engram-mcp` (usually `/opt/homebrew/bin` on Apple Silicon, `/usr/local/bin` on Intel). Claude Code by hand:
+
+```sh
+claude mcp add -s user engram -- /opt/homebrew/bin/engram-mcp
+```
+
+Clients configured with JSON:
 
 ```json
 {
@@ -71,17 +73,23 @@ the Claude Desktop config for you; to wire another client by hand, point it at t
 }
 ```
 
-**Build from source** — no Homebrew needed:
+**If Engram stops showing up**, run `engram-mcp --doctor`. It says what's wrong and the one command that fixes it.
+
+**Build from source**, no Homebrew needed:
 
 ```sh
 git clone https://github.com/albertofettucini/Engram && cd Engram
 swift build -c release
-.build/release/engram-mcp --connect
-bash packaging/make-app.sh           # → Engram.app on your Desktop
+bash packaging/make-app.sh           # → Engram.app (set OUT_DIR to choose where)
 ```
 
-Requirements: the **app needs macOS 14+**; the **CLI tools (MCP server, capture) run on macOS 13+**.
-No backend, no third-party services — the engine, MCP server, and capture tool are pure Swift + Foundation.
+If you connect a source build, `--connect` warns you that the path can move. For daily use, install with Homebrew.
+
+Requirements: the **app needs macOS 14+** and builds with **Xcode 26 or newer** (Liquid Glass). The **CLI tools run on macOS 13+**. No backend and no third-party services.
+
+### Optional: capture from Claude Code transcripts (experimental)
+
+`engram-capture` scans your Claude Code transcripts for things you said that sound durable, and saves them. It's rough, and Claude Code's own memory does this better, so nothing runs unless you start it yourself: `engram-capture`.
 
 ## Engine API
 
