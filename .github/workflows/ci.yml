@@ -3,7 +3,8 @@ name: CI
 # Every push and pull request to main: build each product, run the tests, then smoke-test the built
 # engram-mcp the way a user meets it (--connect, the stdio protocol, --doctor). Everything runs against
 # scratch folders under $RUNNER_TEMP with a scratch HOME and a PATH without `claude`, so no real Claude
-# config or CLI is ever touched. The release workflow is only run on a commit whose CI is green.
+# config or CLI is ever touched. Tag a release only after this workflow is green on that commit (see
+# packaging/RELEASE.md); release.yml doesn't check it.
 
 on:
   push:
